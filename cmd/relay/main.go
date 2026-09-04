@@ -88,6 +88,7 @@ func runRelay(ctx context.Context) error {
 		DiscordToken:  token,
 		DiscordAPIURL: apiURL,
 		ChannelID:     channelID,
+		AllowedUserID: os.Getenv("DISCORD_USER_ID"),
 		DBPath:        dbPath,
 		StateDir:      stateDir,
 	}
@@ -95,6 +96,16 @@ func runRelay(ctx context.Context) error {
 	w, err := mirror.NewWatcher(cfg, db, dc)
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
+	}
+
+	// Open gateway connection to receive MESSAGE_CREATE events.
+	// A failure here is non-fatal: the relay can still mirror sessions to Discord
+	// (outgoing direction works without a gateway connection); only incoming
+	// Discord-to-pane injection will be unavailable until the gateway reconnects.
+	if err := dc.s.Open(); err != nil {
+		log.Printf("relay: discord gateway open: %v (continuing without inbound events)", err)
+	} else {
+		defer dc.s.Close()
 	}
 
 	log.Println("relay: starting watcher")
@@ -157,6 +168,36 @@ func (d *discordAdapter) CreateThread(channelID, messageID, name string) (mirror
 
 func (d *discordAdapter) SendTyping(channelID string) error {
 	return d.s.ChannelTyping(channelID)
+}
+
+func (d *discordAdapter) RenameThread(threadID, name string) error {
+	_, err := d.s.ChannelEdit(threadID, &discordgo.ChannelEdit{Name: name})
+	return err
+}
+
+func (d *discordAdapter) OnMessage(fn mirror.MessageHandler) {
+	d.s.AddHandler(func(_ *discordgo.Session, ev *discordgo.MessageCreate) {
+		if ev.Message == nil {
+			return
+		}
+		me := mirror.MessageEvent{
+			ChannelID: ev.ChannelID,
+			Content:   ev.Content,
+		}
+		if ev.Author != nil {
+			me.AuthorID = ev.Author.ID
+			me.AuthorIsBot = ev.Author.Bot
+		}
+		for _, att := range ev.Attachments {
+			if att != nil {
+				me.Attachments = append(me.Attachments, mirror.MessageAttachment{
+					Filename: att.Filename,
+					URL:      att.URL,
+				})
+			}
+		}
+		fn(me)
+	})
 }
 
 // ── Config helpers ─────────────────────────────────────────────────────────────

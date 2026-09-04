@@ -117,18 +117,39 @@ func run(args []string) error {
 		}
 	}
 
-	// Ensure a session row exists (create a new one if no --session)
+	// Ensure a session row exists.
+	// With --auto and no explicit --session, resume the most recently created session
+	// if one exists in the DB (simulates dpmux-spawned devpass-code resuming a tracked
+	// session). Fall back to creating a new session only when the DB is empty.
 	activeSessionID := sessionID
 	if activeSessionID == "" {
-		activeSessionID = generateID("ses")
-		if err := insertSession(db, activeSessionID); err != nil {
-			return fmt.Errorf("fake-devpass-code: insert session: %w", err)
+		if autoFlag {
+			var existing string
+			row := db.QueryRow(`SELECT id FROM session ORDER BY time_created DESC LIMIT 1`)
+			if err := row.Scan(&existing); err == nil && existing != "" {
+				activeSessionID = existing
+			}
+		}
+		if activeSessionID == "" {
+			activeSessionID = generateID("ses")
+			if err := insertSession(db, activeSessionID); err != nil {
+				return fmt.Errorf("fake-devpass-code: insert session: %w", err)
+			}
 		}
 	}
 
 	// Apply ready delay
-	if d := envMS("FAKE_DP_READY_DELAY_MS"); d > 0 {
-		time.Sleep(d)
+	readyDelay := envMS("FAKE_DP_READY_DELAY_MS")
+	swallowUntilReady := os.Getenv("FAKE_DP_SWALLOW_UNTIL_READY") == "1"
+
+	if readyDelay > 0 {
+		if swallowUntilReady {
+			// Drain stdin during the delay so keys sent to the tmux pane before the
+			// ready signature appears are silently discarded.
+			drainStdin(readyDelay)
+		} else {
+			time.Sleep(readyDelay)
+		}
 	}
 
 	// Print the ready signature (matches DISCOVERY.md §4)
@@ -166,7 +187,7 @@ func run(args []string) error {
 			reply = script[turnIdx].Reply
 			turnIdx++
 		} else {
-			reply = fmt.Sprintf("(echo) %s", prompt)
+			reply = fmt.Sprintf("(ack turn %d)", turnIdx+1)
 		}
 
 		now := time.Now().UnixMilli()
@@ -359,4 +380,43 @@ func envMS(key string) time.Duration {
 		return 0
 	}
 	return time.Duration(n) * time.Millisecond
+}
+
+// drainStdin reads and discards all stdin input for the given duration.
+// Used by FAKE_DP_SWALLOW_UNTIL_READY to simulate a real devpass-code process
+// that ignores keystrokes typed before the ready prompt appears.
+// After d elapses, the drain goroutine exits cleanly and stdin is ready for the
+// scanner to use normally.
+func drainStdin(d time.Duration) {
+	drained := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		buf := make([]byte, 256)
+		for {
+			select {
+			case <-drained:
+				return
+			default:
+			}
+			// Use a short deadline so we can re-check drained frequently.
+			if err := os.Stdin.SetReadDeadline(time.Now().Add(50 * time.Millisecond)); err != nil {
+				// SetReadDeadline not supported (e.g. pipe in unit tests) – just sleep.
+				select {
+				case <-drained:
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+				continue
+			}
+			os.Stdin.Read(buf) //nolint:errcheck
+		}
+	}()
+	time.Sleep(d)
+	close(drained)
+	// Wait for drain goroutine to exit before returning, so the caller's scanner
+	// does not race with a lingering read.
+	<-exited
+	// Reset deadline for normal blocking reads by the scanner.
+	os.Stdin.SetReadDeadline(time.Time{}) //nolint:errcheck
 }

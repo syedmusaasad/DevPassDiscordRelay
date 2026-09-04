@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +63,7 @@ type server struct {
 	ratelimits map[string]float64     // path -> retry_after seconds
 	channels   map[string][]storedMsg // channelID -> messages
 	nextMsgID  int64
+	gwPort     string                 // gateway WS port (for returning in REST gateway endpoint)
 }
 
 type storedMsg struct {
@@ -88,6 +90,7 @@ func main() {
 	gwPort := envOrDefault("MOCK_DISCORD_GATEWAY_PORT", "9877")
 
 	srv := newServer()
+	srv.gwPort = gwPort
 
 	// Gateway WS server
 	gwMux := http.NewServeMux()
@@ -218,12 +221,22 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 // ── REST API ─────────────────────────────────────────────────────────────────
 
 func (s *server) handleREST(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Path
+	w.Header().Set("Content-Type", "application/json")
+
+	// Gateway URL endpoint — discordgo fetches this for any API version (v9, v10, etc.)
+	// Handle before incrementing nextMsgID so IDs stay contiguous for messages.
+	if (strings.HasSuffix(path, "/gateway") || strings.HasSuffix(path, "/gateway/bot")) && r.Method == http.MethodGet {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"url":"ws://127.0.0.1:%s","shards":1,"session_start_limit":{"total":1000,"remaining":999,"reset_after":14400000,"max_concurrency":1}}`, s.gwPort)
+		return
+	}
+
 	// Check rate limit injection
 	s.mu.Lock()
-	retryAfter, limited := s.ratelimits[r.URL.Path]
+	retryAfter, limited := s.ratelimits[path]
 	s.mu.Unlock()
 	if limited {
-		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("Retry-After", fmt.Sprintf("%.3f", retryAfter))
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -245,9 +258,6 @@ func (s *server) handleREST(w http.ResponseWriter, r *http.Request) {
 	s.nextMsgID++
 	id := fmt.Sprintf("%d", s.nextMsgID)
 	s.mu.Unlock()
-
-	path := r.URL.Path
-	w.Header().Set("Content-Type", "application/json")
 
 	switch {
 	case contains(path, "/messages") && r.Method == http.MethodPost:

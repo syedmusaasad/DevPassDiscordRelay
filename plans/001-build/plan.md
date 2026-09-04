@@ -17,6 +17,12 @@ DECISION discovered-facts: devpass-code 1.18.11. Trust flag `--auto`. Resume `--
 <id>`. Refusal pane text `Error: Session not found: <id>` (no new session row is
 created). Readiness signature: the pane contains `Ask anything...`. Keys sent before it
 are swallowed. Conversation ids are `ses_<...>`.
+DECISION host-swap: phase 4 burned 3 attempts, every one an OOM SIGKILL (3.8 GB RAM, no
+swap, other sessions on the host). Operator approved a 4 GB /swapfile (persisted in
+/etc/fstab) and `go test -p 1` in the Makefile; neither weakens a test. Run resumed.
+DECISION publish-target: operator asked for the finished repo to be pushed to GitHub as
+DevPassDiscordRelay under account syedmusaasad. Neither gh nor an SSH key for
+github.com is present on this box, so the operator supplies credentials via the gate.
 
 ## Phase 1: toolchain (fast-worker)
 TIMEOUT: 1200
@@ -174,6 +180,7 @@ FAKE_DP_READY_DELAY_MS=3000; the prompt still lands exactly once),
 `m2: inject Discord thread replies into the live pane`.
 
 ## Phase 6: milestone 3, spawn from Discord (implementer)
+AFTER: 13
 TIMEOUT: 2400
 ATTEMPTS: 3
 REVIEW: cross
@@ -291,3 +298,67 @@ CONTRIBUTING.md: `make unit`, `make integration`, `make test`, `T=<name>` filter
 fake CLI knobs, the mock Discord control endpoint, the rule that tests never touch the
 real HOME or real Discord. CHANGELOG.md: 0.1.0 with the six milestones. Stage only these
 four files; commit exactly: `docs: README, SETUP, CONTRIBUTING, CHANGELOG`.
+
+## Phase 11: ready to publish (gate)
+GATE: .gate-publish
+
+## Phase 12: publish to GitHub (implementer)
+TIMEOUT: 900
+EXIT: git remote get-url origin | grep -qE 'github.com[:/]syedmusaasad/DevPassDiscordRelay(\.git)?$'
+EXIT: git fetch -q origin && git diff --quiet HEAD origin/main
+EXIT: git ls-remote --tags origin | grep -q 'refs/tags/latest$'
+
+Read the credential file /root/devpass-discord-relay/plans/001-build/.gate-publish: line
+1 is `token=<GitHub PAT with repo scope>`. Never echo, log, or commit the token; never
+write it into any file under the repo. Confirm the working tree is clean and
+`make unit` passes before pushing. Create the repository if it does not exist:
+`curl -sf -H "Authorization: Bearer $TOKEN" https://api.github.com/user/repos -d
+'{"name":"DevPassDiscordRelay","private":false}'` (a 422 "already exists" is success).
+Set `git remote add origin https://github.com/syedmusaasad/DevPassDiscordRelay.git`
+(or set-url if origin exists), ensure the branch is named `main`, push via a one-shot
+credential helper (`git -c credential.helper='!f() { echo username=syedmusaasad; echo
+password=$TOKEN; }; f' push -u origin main`), then tag the HEAD `latest` (this is what
+`dpmux update` pulls) and push the tag. Afterwards `shred -u` the gate file's token
+line is NOT permitted (the engine owns the sentinel); instead leave it and write
+nothing else. Final lines: `git ls-remote --tags origin`.
+
+## Phase 13: m1 review remediation (implementer)
+AFTER: 5
+TIMEOUT: 2400
+ATTEMPTS: 3
+REVIEW: cross
+EXIT: make test
+EXIT: grep -rq 'func TestMirror_LongTextChunksToFollowups' test/integration
+EXIT: grep -rq 'func TestMirror_ToolErrorSoftenedOnCleanEnd' test/integration
+EXIT: grep -rq 'func TestThrottle_429Backoff' internal
+EXIT: grep -rq 'func TestDpmux_MarkerBeforeSpawn' test/integration
+EXIT: git log -1 --format=%s | grep -qxF 'm1-fix: chunk long text, soften tool errors, honor 429, marker before spawn'
+
+Cross review of phase 4 (verdicts in /root/.system/runs/run_20260904T054447_438b65/
+phase-4/review/reviewer-a/review.md and reviewer-b/review.md; read both) found spec gaps
+that landed. Fix each, with the named test:
+1. internal/mirror/watcher.go truncates assistant text to one 2000-char chunk. Post ALL
+   chunks: first message edited in place while streaming; when it would exceed 2000,
+   split at the last paragraph/sentence/space boundary and continue in a follow-up
+   message that becomes the new edit target. `TestMirror_LongTextChunksToFollowups`
+   (fake CLI emits a 5000-char reply; the thread holds >=3 messages whose concatenation
+   equals the reply).
+2. Tool error followed by a clean step-finish is never softened. Implement in-place:
+   error row flips to a warning glyph and the embed footer reads "turn completed".
+   `TestMirror_ToolErrorSoftenedOnCleanEnd`.
+3. 429 from Discord is treated as an ordinary error. Parse retry_after from the
+   discordgo RateLimitError / response body, sleep it, retry the same edit/send once;
+   feed the throttle. `TestThrottle_429Backoff` (unit, mock returning one 429 then 200).
+4. cmd/dpmux writes pending-<name> AFTER tmux new-session. Write it BEFORE spawning
+   (the brief and the spec say so). `TestDpmux_MarkerBeforeSpawn` (integration: run
+   dpmux with RELAY_DEVPASS_BIN pointing at a stub that records whether the marker
+   existed at its start).
+5. cmd/dpmux inside-pane detection: only use new-window when $TMUX names the default
+   per-uid socket (/tmp/tmux-<uid>/default or $TMUX_TMPDIR equivalent); any other
+   socket → fresh session on the default socket.
+6. Liveness must check the full target: `tmux list-panes -t <target>` (window-level),
+   not `has-session`.
+7. `dpmux ls`: list only dp-* sessions and their windows, suppressing window lines that
+   duplicate their session name. Drop the `_ = strconv.Itoa` hack.
+Do not touch phase-5 (inject) behavior beyond what these fixes require. Commit exactly:
+`m1-fix: chunk long text, soften tool errors, honor 429, marker before spawn`.

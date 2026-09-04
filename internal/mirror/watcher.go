@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/devpass/devpass-discord-relay/internal/inject"
 	"github.com/devpass/devpass-discord-relay/internal/transcript"
 )
 
@@ -22,6 +23,7 @@ type Config struct {
 	DiscordToken  string
 	DiscordAPIURL string // override for testing
 	ChannelID     string
+	AllowedUserID string // only honour messages from this Discord user ID (DISCORD_USER_ID)
 
 	// DB
 	DBPath string
@@ -39,7 +41,30 @@ type DiscordClient interface {
 	EditMessage(channelID, messageID, content string) error
 	CreateThread(channelID, messageID, name string) (ThreadRef, error)
 	SendTyping(channelID string) error
+	RenameThread(threadID, name string) error
+	// OnMessage registers a callback invoked for every MESSAGE_CREATE gateway event.
+	// Multiple handlers may be registered; each receives a copy of the event.
+	OnMessage(fn MessageHandler)
 }
+
+// MessageEvent carries the fields of a Discord MESSAGE_CREATE event that the
+// inject path needs.
+type MessageEvent struct {
+	ChannelID   string
+	AuthorID    string
+	AuthorIsBot bool
+	Content     string
+	Attachments []MessageAttachment
+}
+
+// MessageAttachment is a single file attachment on a Discord message.
+type MessageAttachment struct {
+	Filename string
+	URL      string
+}
+
+// MessageHandler is called for every incoming Discord message.
+type MessageHandler func(ev MessageEvent)
 
 // MsgRef is a minimal message reference.
 type MsgRef struct {
@@ -59,6 +84,7 @@ type Watcher struct {
 	discord  DiscordClient
 	sessions *Sessions
 	throttle *Throttle
+	injector *inject.Injector
 }
 
 // NewWatcher creates a watcher. db must already be open read-only.
@@ -71,13 +97,19 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 	if err != nil {
 		return nil, fmt.Errorf("mirror: load sessions: %w", err)
 	}
-	return &Watcher{
+	w := &Watcher{
 		cfg:      cfg,
 		db:       db,
 		discord:  discord,
 		sessions: sessions,
 		throttle: NewThrottle(5, 5*time.Second),
-	}, nil
+		injector: inject.New(cfg.StateDir),
+	}
+
+	// Register incoming message handler for thread replies.
+	discord.OnMessage(w.handleDiscordMessage)
+
+	return w, nil
 }
 
 // Run starts the watcher loop until ctx is cancelled.
@@ -501,4 +533,52 @@ func isTmuxPaneAlive(target string) bool {
 	// Use has-session for session-level check; for window/pane use list-panes
 	err := exec.Command("tmux", "has-session", "-t", target).Run()
 	return err == nil
+}
+
+// handleDiscordMessage is registered with the Discord client to receive
+// MESSAGE_CREATE gateway events. It dispatches thread replies to the injector.
+func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
+	// Drop bots and non-allowed authors immediately.
+	if !inject.ShouldAcceptAuthor(ev.AuthorID, ev.AuthorIsBot, w.cfg.AllowedUserID) {
+		return
+	}
+
+	// Find the session that owns this thread.
+	var rec *SessionRecord
+	for _, r := range w.sessions.All() {
+		if r.ThreadID == ev.ChannelID {
+			rec = r
+			break
+		}
+	}
+	if rec == nil {
+		// Not a thread we manage.
+		return
+	}
+
+	log.Printf("mirror: handleDiscordMessage: channel=%s session=%s", ev.ChannelID, rec.SessionID)
+
+	// Handle !title command.
+	if title, ok := inject.HandleTitleCommand(ev.Content); ok {
+		if err := w.discord.RenameThread(rec.ThreadID, title); err != nil {
+			log.Printf("mirror: rename thread %s: %v", rec.ThreadID, err)
+		}
+		return
+	}
+
+	// Build attachment list from image attachments.
+	var attachments []inject.Attachment
+	for _, att := range ev.Attachments {
+		attachments = append(attachments, inject.Attachment{
+			Filename: att.Filename,
+			URL:      att.URL,
+		})
+	}
+
+	// Inject in a goroutine so we don't block the gateway event loop.
+	go func(target, sessionID, content string, atts []inject.Attachment) {
+		if err := w.injector.Inject(target, sessionID, content, atts); err != nil {
+			log.Printf("mirror: inject session %s: %v", sessionID, err)
+		}
+	}(rec.TmuxTarget, rec.SessionID, ev.Content, attachments)
 }
