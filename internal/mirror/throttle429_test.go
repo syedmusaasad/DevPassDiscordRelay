@@ -10,8 +10,23 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// mock429DiscordClient is a DiscordClient where SendMessage returns a 429-style
-// error on the first call and succeeds on subsequent calls.
+// rateLimitTestError is a typed 429 error for use in unit tests.
+// It implements the retryAfterDurationGetter interface checked by extractRetryAfter.
+type rateLimitTestError struct {
+	retryAfter time.Duration
+	channel    string
+}
+
+func (e *rateLimitTestError) Error() string {
+	return fmt.Sprintf("Rate limit exceeded on %s, retry after %s", e.channel, e.retryAfter)
+}
+
+func (e *rateLimitTestError) RetryAfterDuration() time.Duration {
+	return e.retryAfter
+}
+
+// mock429DiscordClient is a DiscordClient where SendMessage returns a typed
+// *rateLimitTestError on the first call and succeeds on subsequent calls.
 type mock429DiscordClient struct {
 	calls   int
 	sent    []string
@@ -21,9 +36,9 @@ type mock429DiscordClient struct {
 func (m *mock429DiscordClient) SendMessage(channelID, content string) (MsgRef, error) {
 	m.calls++
 	if m.calls == 1 {
-		// Simulate a 429 error with retry_after in the message.
+		// Return a typed 429 error so extractRetryAfter exercises the typed path.
 		d := time.Duration(m.retryMS) * time.Millisecond
-		return MsgRef{}, fmt.Errorf("Rate limit exceeded on %s, retry after %s", channelID, d)
+		return MsgRef{}, &rateLimitTestError{retryAfter: d, channel: channelID}
 	}
 	m.sent = append(m.sent, content)
 	return MsgRef{ID: fmt.Sprintf("msg-%d", m.calls), ChannelID: channelID}, nil
@@ -33,7 +48,7 @@ func (m *mock429DiscordClient) EditMessage(channelID, messageID, content string)
 	m.calls++
 	if m.calls == 1 {
 		d := time.Duration(m.retryMS) * time.Millisecond
-		return fmt.Errorf("Rate limit exceeded on %s, retry after %s", channelID, d)
+		return &rateLimitTestError{retryAfter: d, channel: channelID}
 	}
 	return nil
 }
@@ -48,9 +63,9 @@ func (m *mock429DiscordClient) RenameThread(threadID, name string) error { retur
 
 func (m *mock429DiscordClient) OnMessage(fn MessageHandler) {}
 
-// TestThrottle_429Backoff verifies that when a Discord send returns a 429 error
-// containing "retry after <duration>", the watcher:
-//  1. Parses the retry_after duration.
+// TestThrottle_429Backoff verifies that when a Discord send returns a typed 429
+// *rateLimitTestError, the watcher:
+//  1. Extracts the retry_after duration via the typed interface.
 //  2. Feeds it into the Throttle via SetBackoff.
 //  3. Sleeps for at least retry_after.
 //  4. Retries the send once and succeeds.
@@ -91,29 +106,40 @@ func TestThrottle_429Backoff(t *testing.T) {
 	t.Logf("✓ 429 backoff: %d calls, elapsed=%v (retry_after=%v)", mock.calls, elapsed.Round(time.Millisecond), minDelay)
 }
 
-// TestExtractRetryAfter verifies the error-string parser for discordgo-style rate-limit errors.
+// TestExtractRetryAfter verifies the typed and string-fallback paths for rate-limit errors.
 func TestExtractRetryAfter(t *testing.T) {
 	cases := []struct {
+		name   string
 		err    error
 		want   time.Duration
 		wantOK bool
 	}{
 		{
+			name:   "typed rateLimitTestError",
+			err:    &rateLimitTestError{retryAfter: 500 * time.Millisecond},
+			want:   500 * time.Millisecond,
+			wantOK: true,
+		},
+		{
+			name:   "string fallback 500ms",
 			err:    fmt.Errorf("Rate limit exceeded on /api/v10/channels/123/messages, retry after 500ms"),
 			want:   500 * time.Millisecond,
 			wantOK: true,
 		},
 		{
+			name:   "string fallback 2s",
 			err:    fmt.Errorf("Rate limit exceeded on /api/v10/channels/123/messages, retry after 2s"),
 			want:   2 * time.Second,
 			wantOK: true,
 		},
 		{
+			name:   "unrelated error",
 			err:    fmt.Errorf("some other error"),
 			want:   0,
 			wantOK: false,
 		},
 		{
+			name:   "nil error",
 			err:    nil,
 			want:   0,
 			wantOK: false,
@@ -121,14 +147,16 @@ func TestExtractRetryAfter(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		got, ok := extractRetryAfter(tc.err)
-		if ok != tc.wantOK {
-			t.Errorf("extractRetryAfter(%v): ok=%v, want %v", tc.err, ok, tc.wantOK)
-			continue
-		}
-		if ok && got != tc.want {
-			t.Errorf("extractRetryAfter(%v): got %v, want %v", tc.err, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := extractRetryAfter(tc.err)
+			if ok != tc.wantOK {
+				t.Errorf("extractRetryAfter(%v): ok=%v, want %v", tc.err, ok, tc.wantOK)
+				return
+			}
+			if ok && got != tc.want {
+				t.Errorf("extractRetryAfter(%v): got %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

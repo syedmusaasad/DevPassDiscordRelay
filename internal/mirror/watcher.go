@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/devpass/devpass-discord-relay/internal/inject"
 	"github.com/devpass/devpass-discord-relay/internal/transcript"
 )
@@ -225,7 +226,7 @@ func (w *Watcher) Run(ctx context.Context) {
 // scanSessions checks for new non-subagent sessions and pairs them with pending markers.
 func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 	rows, err := w.db.QueryContext(ctx,
-		`SELECT id, time_created FROM session WHERE parent_id IS NULL ORDER BY time_created ASC`)
+		`SELECT id, time_created, title FROM session WHERE parent_id IS NULL ORDER BY time_created ASC`)
 	if err != nil {
 		return
 	}
@@ -234,12 +235,13 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 	type sessionRow struct {
 		id      string
 		created int64
+		title   string
 	}
 
 	var sessions []sessionRow
 	for rows.Next() {
 		var r sessionRow
-		if err := rows.Scan(&r.id, &r.created); err != nil {
+		if err := rows.Scan(&r.id, &r.created, &r.title); err != nil {
 			continue
 		}
 		sessions = append(sessions, r)
@@ -251,7 +253,7 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 			continue
 		}
 		// Try to pair with a pending marker
-		target, pendingPath, ok := findPendingMarker(w.cfg.StateDir, s.id, s.created)
+		target, pendingPath, ok := findPendingMarker(w.cfg.StateDir, s.id, s.created, s.title)
 		if !ok {
 			// Unmatched session – ignore per spec
 			continue
@@ -275,9 +277,22 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 	}
 }
 
+// spawnMarkerJSON is the JSON format of a pending marker written by dpmux.
+type spawnMarkerJSON struct {
+	Target       string `json:"target"`
+	Nonce        string `json:"nonce"`
+	SpawnInstant int64  `json:"spawnInstant"`
+}
+
 // findPendingMarker looks for a pending-<name> marker file in stateDir.
-// It matches any marker whose modification time is within 30s before the session creation.
-func findPendingMarker(stateDir string, sessionID string, createdAt int64) (target, pendingPath string, ok bool) {
+// It matches by nonce: the marker's nonce must appear in the session's title
+// column (stored as "nonce:<hex>"). The session must also have been created
+// at or after the marker's spawnInstant (no grace period).
+//
+// Legacy plain-text markers (non-JSON, pre-nonce) are accepted only when the
+// session was created strictly after the marker was written (no grace period,
+// no backwards allowance) to avoid binding stale rows.
+func findPendingMarker(stateDir string, sessionID string, createdAt int64, sessionTitle string) (target, pendingPath string, ok bool) {
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
 		return "", "", false
@@ -291,15 +306,30 @@ func findPendingMarker(stateDir string, sessionID string, createdAt int64) (targ
 		if err != nil {
 			continue
 		}
-		// Check file mod time: session must have been created within 30s after the marker
+
+		// Try parsing as JSON (nonce-bearing marker).
+		var m spawnMarkerJSON
+		if jsonErr := json.Unmarshal(data, &m); jsonErr == nil && m.Nonce != "" {
+			// Session must have been created at or after the spawn instant.
+			if createdAt < m.SpawnInstant {
+				continue
+			}
+			// Session title must contain the nonce.
+			expectedTitle := "nonce:" + m.Nonce
+			if !strings.Contains(sessionTitle, expectedTitle) {
+				continue
+			}
+			return m.Target, fp, true
+		}
+
+		// Legacy plain-text marker: target is the raw content.
+		// Accept only if session was created strictly after the marker was written.
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		markerTimeMS := info.ModTime().UnixMilli()
-		// Accept if session was created within [-5s, +30s] of the marker being written
-		diff := createdAt - markerTimeMS
-		if diff >= -5000 && diff <= 30000 {
+		if createdAt >= markerTimeMS {
 			return strings.TrimSpace(string(data)), fp, true
 		}
 	}
@@ -368,7 +398,6 @@ type msgState struct {
 	discordMsgID  string   // current edit-target Discord message ID for assistant text
 	discordMsgIDs []string // all Discord message IDs posted for this assistant text (for softening)
 	text          string   // accumulated text so far
-	chunkedBytes  int      // byte offset into text that has been committed to discordMsgIDs[:-1]
 	toolCalls     map[string]*toolState
 	isPreamble    bool
 	finishSeen    bool
@@ -651,39 +680,23 @@ func (w *Watcher) discordEdit(channelID, messageID, content string) error {
 	return err
 }
 
-// rateLimitErr is the interface satisfied by discordgo.RateLimitError.
-type rateLimitErr interface {
-	error
-	// RetryAfter is embedded via *RateLimit → *TooManyRequests.
-}
-
-// ExtractRetryAfter extracts the retry_after duration from a discordgo rate-limit error.
-// It checks for the discordgo RateLimitError interface (has RetryAfter field via
-// reflection-unsafe casting) or parses the error string as a fallback.
-// Exported for use in unit tests.
-func ExtractRetryAfter(err error) (time.Duration, bool) {
-	return extractRetryAfter(err)
-}
-
-// extractRetryAfter extracts the retry_after duration from a discordgo rate-limit error.
-// It checks for the discordgo RateLimitError interface (has RetryAfter field via
-// reflection-unsafe casting) or parses the error string as a fallback.
+// extractRetryAfter extracts the retry_after duration from a rate-limit error.
+// It checks for:
+//  1. *discordgo.RateLimitError (real Discord 429 responses via discordgo)
+//  2. retryAfterDurationGetter interface (test doubles)
+//  3. String fallback: "retry after <duration>" in error message
 func extractRetryAfter(err error) (time.Duration, bool) {
 	if err == nil {
 		return 0, false
 	}
-	// discordgo.RateLimitError embeds *RateLimit which embeds *TooManyRequests.
-	// We can't import discordgo here, so use an interface with a method.
-	type retryAfterGetter interface {
-		GetRetryAfter() time.Duration
-	}
-	// Try the interface directly.
-	var rg retryAfterGetter
-	if errors.As(err, &rg) {
-		return rg.GetRetryAfter(), true
+
+	// Primary path: discordgo typed rate-limit error.
+	var rle *discordgo.RateLimitError
+	if errors.As(err, &rle) && rle.RateLimit != nil {
+		return rle.RetryAfter, true
 	}
 
-	// Try unwrapping to find a *retryAfterHolder (our own wrapper, used in tests).
+	// Secondary path: test double that implements RetryAfterDuration().
 	type retryHolder interface {
 		RetryAfterDuration() time.Duration
 	}
@@ -1077,6 +1090,12 @@ func (w *Watcher) spawnResume(ctx context.Context, sessionID string) (string, er
 		// Marker may already be consumed; derive target from session name.
 		return sessionName + ":0.0", nil
 	}
+	// Try parsing as JSON (nonce-bearing marker).
+	var m spawnMarkerJSON
+	if jsonErr := json.Unmarshal(data, &m); jsonErr == nil && m.Target != "" {
+		return m.Target, nil
+	}
+	// Legacy plain-text marker.
 	return strings.TrimSpace(string(data)), nil
 }
 
@@ -1369,11 +1388,12 @@ func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
 //
 // Binding contract:
 //   - spawnStart is recorded BEFORE dpmux is invoked.
-//   - Only session rows with time_created >= spawnStart are candidates.
-//   - Among those candidates, only the row whose pending marker name matches
-//     the session name printed by dpmux is accepted.
-//   - Lexicographic ordering of session IDs is never used; the pending marker
-//     (written by dpmux before spawning devpass-code) is the sole pairing key.
+//   - dpmux writes a JSON pending marker containing a nonce and the spawn instant.
+//   - The nonce is passed to devpass-code via RELAY_SPAWN_NONCE; devpass-code
+//     embeds it in the session title as "nonce:<hex>".
+//   - Only session rows with title "nonce:<hex>" matching the marker are accepted.
+//   - Rows created before the marker's spawnInstant are never accepted.
+//   - Lexicographic ordering of session IDs is never used.
 //
 // TODO(phase9): wrap dpmux invocation with systemd-run for process isolation.
 func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, evAtts []MessageAttachment) error {
@@ -1422,19 +1442,33 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	}
 	log.Printf("mirror: dpmux spawned session %q", sessionName)
 
-	// The pending marker written by dpmux is pending-<sessionName>.
-	pendingMarkerName := "pending-" + sessionName
-	pendingPath := filepath.Join(w.cfg.StateDir, pendingMarkerName)
+	// Read and parse the pending marker written by dpmux.
+	pendingPath := filepath.Join(w.cfg.StateDir, "pending-"+sessionName)
+	markerData, readErr := os.ReadFile(pendingPath)
+	if readErr != nil {
+		return fmt.Errorf("read pending marker for %q: %w", sessionName, readErr)
+	}
+	var marker spawnMarkerJSON
+	if err := json.Unmarshal(markerData, &marker); err != nil {
+		return fmt.Errorf("parse pending marker for %q: %w", sessionName, err)
+	}
+	if marker.Nonce == "" {
+		return fmt.Errorf("pending marker for %q has empty nonce", sessionName)
+	}
+	spawnInstant := marker.SpawnInstant
+	if spawnInstant < spawnStartMS {
+		spawnInstant = spawnStartMS
+	}
 
-	// Poll the DB for the new session row.  The row must have
-	// time_created >= spawnStartMS and its pending marker must exist.
-	// Never use lexicographic ordering; never use a process-start baseline
-	// snapshot of existing session IDs.
+	// The nonce is embedded in the session title by devpass-code as "nonce:<hex>".
+	// Poll the DB for the session row whose title contains the nonce.
+	// Never accept rows created before the spawn instant.
+	nonceTitle := "nonce:" + marker.Nonce
 	bindTimeout := w.cfg.SpawnBindTimeout
 	deadline := time.Now().Add(bindTimeout)
 
 	var boundSessionID string
-	var tmuxTarget string
+	tmuxTarget := marker.Target
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
@@ -1442,50 +1476,29 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 		default:
 		}
 
-		rows, err := w.db.QueryContext(ctx,
-			`SELECT id, time_created FROM session WHERE parent_id IS NULL AND time_created >= ? ORDER BY time_created ASC`,
-			spawnStartMS)
-		if err != nil {
-			time.Sleep(300 * time.Millisecond)
-			continue
-		}
-
-		found := false
-		for rows.Next() {
-			var sid string
-			var tc int64
-			if err := rows.Scan(&sid, &tc); err != nil {
-				continue
+		var sid string
+		queryErr := w.db.QueryRowContext(ctx,
+			`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? AND title = ? LIMIT 1`,
+			spawnInstant, nonceTitle,
+		).Scan(&sid)
+		if queryErr == nil && sid != "" {
+			// Verify the pending marker still exists (it may have been consumed by
+			// scanSessions already; if so, check sessions.json).
+			if _, statErr := os.Stat(pendingPath); statErr == nil {
+				boundSessionID = sid
+				break
 			}
-			// Verify the pending marker for our specific dpmux session still exists.
-			// We check for this exact marker (not any marker) so that a concurrent
-			// stale spawn's marker cannot steal the bind.
-			data, err := os.ReadFile(pendingPath)
-			if err != nil {
-				// Marker consumed (already removed by scanSessions), or not yet written.
-				// If scanSessions already consumed it (raced us), the session will also
-				// be in w.sessions already; check there.
-				if existing := w.sessions.Get(sid); existing != nil {
-					// Already bound by scanSessions; grab its target.
-					boundSessionID = sid
-					tmuxTarget = existing.TmuxTarget
-					found = true
-					break
-				}
-				continue
+			// Marker already consumed by scanSessions.
+			if existing := w.sessions.Get(sid); existing != nil {
+				boundSessionID = sid
+				tmuxTarget = existing.TmuxTarget
+				break
 			}
-			// Marker exists; verify it matches this session name.
-			target := strings.TrimSpace(string(data))
+			// Marker consumed but session not yet in sessions.json; it's being processed.
 			boundSessionID = sid
-			tmuxTarget = target
-			found = true
 			break
 		}
-		rows.Close()
 
-		if found {
-			break
-		}
 		time.Sleep(300 * time.Millisecond)
 	}
 

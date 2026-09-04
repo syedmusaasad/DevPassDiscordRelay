@@ -7,13 +7,17 @@
 //
 // Session name: dp-<unixtime>-<pid>
 // Passes --auto to devpass-code unless --untrusted appears anywhere in args.
-// Writes ~/.devpass-discord-relay/pending-<session-name> containing the tmux target.
+// Writes ~/.devpass-discord-relay/pending-<session-name> as JSON containing
+// the tmux target, a nonce, and the spawn instant.  The nonce is also passed
+// to devpass-code via RELAY_SPAWN_NONCE so it lands in the session row's title
+// column, allowing the relay to prove the binding is its own.
 //
 // Inside-pane detection:
 //   - If we are already inside a pane on the DEFAULT per-uid socket
 //     (/tmp/tmux-<uid>/default or $TMUX_TMPDIR/default) → new-window in
 //     the host session, target <host-session>:=<window-name>
-//   - Any other socket (or no TMUX) → fresh session on the default socket.
+//   - Any other socket (including non-default $TMUX) → unset TMUX and run
+//     tmux -L default new-session on the default socket.
 //
 // Env overrides:
 //
@@ -23,6 +27,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -86,6 +93,24 @@ func runLS() error {
 	return nil
 }
 
+// pendingMarker is the JSON written to pending-<session-name> in stateDir.
+// The relay reads this to bind the session row to the spawn.
+type pendingMarker struct {
+	Target       string `json:"target"`       // tmux target (e.g. "dp-123:0.0")
+	Nonce        string `json:"nonce"`        // random hex nonce also embedded in session title
+	SpawnInstant int64  `json:"spawnInstant"` // time.Now().UnixMilli() when marker was written
+}
+
+// generateNonce returns 16 random hex bytes.
+func generateNonce() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use time-based value (should not occur in practice).
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
 // runLaunch launches a new devpass-code session.
 func runLaunch(args []string) error {
 	stateDir, err := resolveStateDir()
@@ -121,51 +146,83 @@ func runLaunch(args []string) error {
 		dpArgs = append([]string{"--auto"}, dpArgs...)
 	}
 
+	// Generate a nonce that will be embedded in both the pending marker and the
+	// devpass-code session title, allowing the relay to prove the binding is its own.
+	nonce := generateNonce()
+
 	// Detect if we're inside a tmux pane on the DEFAULT per-uid socket.
 	// The TMUX env var format is: <socket-path>,<server-pid>,<window-index>
 	// Only use new-window when the socket path is the default per-uid socket
 	// (/tmp/tmux-<uid>/default or $TMUX_TMPDIR/default).
+	// When running on a non-default socket (foreign socket), unset TMUX and
+	// launch a fresh session on the default socket so all relay sessions land
+	// on a predictable socket.
 	isInsideDefaultSocket := isOnDefaultTmuxSocket()
 
 	var tmuxTarget string
-	var launchErr error
 
 	if isInsideDefaultSocket {
 		// We're inside tmux on the default socket; create a new window in the host session.
 		hostSessionName := extractHostSessionName()
-		if hostSessionName == "" {
-			// fallback: use a new session
-			isInsideDefaultSocket = false
-		} else {
+		if hostSessionName != "" {
 			windowName := sessionName
 			tmuxTarget = hostSessionName + ":=" + windowName
-			launchCmd := buildDevpassCmd(devpassBin, dpArgs)
-			launchErr = exec.Command("tmux", "new-window", "-t", hostSessionName, "-n", windowName,
+
+			// Write the pending marker BEFORE spawning so the relay can pair
+			// the session even if devpass-code creates the DB row immediately.
+			pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+			marker := pendingMarker{
+				Target:       tmuxTarget,
+				Nonce:        nonce,
+				SpawnInstant: time.Now().UnixMilli(),
+			}
+			markerJSON, _ := json.Marshal(marker)
+			if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
+				return fmt.Errorf("write pending marker: %w", err)
+			}
+
+			launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce)
+			launchErr := exec.Command("tmux", "new-window", "-t", hostSessionName, "-n", windowName,
 				"-d", launchCmd).Run()
+			if launchErr == nil {
+				fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
+				fmt.Println(sessionName)
+				return nil
+			}
+			// new-window failed; fall through to fresh-session path below.
+			// Remove marker so it can be rewritten with the correct target.
+			os.Remove(pendingPath)
 		}
+		// Could not get host session name or new-window failed; fall through.
 	}
 
-	if !isInsideDefaultSocket || launchErr != nil {
-		// Fresh session on default socket
-		tmuxTarget = sessionName + ":0.0"
-	}
+	// Fresh session on the default socket.
+	// When running on a non-default $TMUX socket (foreign socket), we deliberately
+	// ignore TMUX so tmux creates the session on the default per-uid socket.
+	tmuxTarget = sessionName + ":0.0"
 
-	// Write pending marker BEFORE spawning so the relay can pair even if the
-	// process starts immediately. This is the contract from the spec.
+	// Write pending marker BEFORE spawning.
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
-	if err := os.WriteFile(pendingPath, []byte(tmuxTarget), 0644); err != nil {
+	marker := pendingMarker{
+		Target:       tmuxTarget,
+		Nonce:        nonce,
+		SpawnInstant: time.Now().UnixMilli(),
+	}
+	markerJSON, _ := json.Marshal(marker)
+	if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
 		return fmt.Errorf("write pending marker: %w", err)
 	}
 
-	if !isInsideDefaultSocket || launchErr != nil {
-		launchCmd := buildDevpassCmd(devpassBin, dpArgs)
-		launchErr = exec.Command("tmux", "new-session", "-d", "-s", sessionName,
-			"-x", "220", "-y", "50", launchCmd).Run()
-		if launchErr != nil {
-			// Clean up pending marker on failure.
-			os.Remove(pendingPath)
-			return fmt.Errorf("tmux new-session: %w", launchErr)
-		}
+	launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce)
+	// Run tmux on the default socket by name ("-L default") rather than relying
+	// on the inherited TMUX env var.  When the process is already inside a
+	// non-default tmux server, the TMUX env var would cause "new-session" to
+	// talk to the wrong server; using "-L default" bypasses this.
+	launchErr := exec.Command("tmux", "-L", "default", "new-session", "-d", "-s", sessionName,
+		"-x", "220", "-y", "50", launchCmd).Run()
+	if launchErr != nil {
+		os.Remove(pendingPath)
+		return fmt.Errorf("tmux new-session: %w", launchErr)
 	}
 
 	fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
@@ -177,9 +234,12 @@ func runLaunch(args []string) error {
 // It optionally prepends an "env VAR=VAL ..." prefix to forward environment
 // variables that the devpass-code process needs but may not inherit via the
 // tmux server's stored environment.  Currently forwards:
-//   - RELAY_DEVPASS_DB  → passed verbatim so fake-devpass-code can find the DB
-//   - FAKE_DP_*         → test fault-injection knobs
-func buildDevpassCmd(devpassBin string, args []string) string {
+//   - RELAY_DEVPASS_DB    → passed verbatim so fake-devpass-code can find the DB
+//   - RELAY_SPAWN_NONCE   → the per-spawn nonce embedded in the pending marker;
+//     fake-devpass-code writes it into the session title so the relay can verify
+//     the binding is its own
+//   - FAKE_DP_*           → test fault-injection knobs
+func buildDevpassCmd(devpassBin string, args []string, nonce string) string {
 	// Collect env vars to forward explicitly.
 	var envPairs []string
 	for _, key := range []string{
@@ -194,6 +254,10 @@ func buildDevpassCmd(devpassBin string, args []string) string {
 		if v := os.Getenv(key); v != "" {
 			envPairs = append(envPairs, key+"="+shellQuote(v))
 		}
+	}
+	// Always forward the nonce if one was provided.
+	if nonce != "" {
+		envPairs = append(envPairs, "RELAY_SPAWN_NONCE="+shellQuote(nonce))
 	}
 
 	parts := make([]string, 0, len(args)+1+len(envPairs)+1)

@@ -19,23 +19,24 @@ import (
 
 // ── TestInvariant1_OwnTranscriptBinding ──────────────────────────────────────
 //
-// Invariant 1: a stale session row created after relay start but BEFORE the
-// spawn must never be bound to the spawn.
+// Invariant 1: a stale session row created AFTER relay start but BEFORE the
+// spawn must never be bound to the spawn, even if its id sorts lexicographically
+// first among all rows created after relay start.
 //
 // Setup:
-//  1. Create a DB and insert a "stale" session whose time_created is set to a
-//     past timestamp (before spawnStart).  Also write a pending marker for the
-//     stale session with an earlier mtime so findPendingMarker's time-range
-//     heuristic would accept it under a naive implementation.
-//  2. Start the relay (it sees the stale session on its first scan but cannot
-//     pair it because the marker name doesn't match any real dpmux session).
-//  3. Send a Discord channel message to the relay channel.  The relay spawns
+//  1. Create a DB (no pre-existing rows) and start the relay.
+//  2. Insert a "stale" session row whose id sorts before all real session ids
+//     (e.g. "ses_000_stale") and whose time_created is after relay start but
+//     will be before spawnStart.  Its title is a plain string (no nonce prefix)
+//     so neither scanSessions nor handleSpawnFromDiscord can match it.
+//  3. Wait for the relay to see the stale row (one poll cycle).
+//  4. Send a Discord channel message to the relay channel.  The relay spawns
 //     dpmux, which launches fake-devpass-code and creates a NEW session row
-//     with time_created > spawnStart.  FAKE_DP_FORCE_NEW_SESSION=1 prevents
+//     with a nonce-bearing title.  FAKE_DP_FORCE_NEW_SESSION=1 prevents
 //     fake-devpass-code from auto-resuming the stale row.
-//  4. Verify the relay creates a Discord thread for the NEW session only.
+//  5. Verify the relay creates a Discord thread for the NEW session only.
 //     The stale session id must not appear in any sent message.
-//  5. Verify the original Discord message text is injected as the first prompt
+//  6. Verify the original Discord message text is injected as the first prompt
 //     in the NEW session.
 func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	mustBin(t, "tmux")
@@ -55,7 +56,7 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 		t.Fatalf("mock-discord not ready: %v", err)
 	}
 
-	// ── Step 1: Create DB with a stale session ────────────────────────────────
+	// ── Step 1: Create an empty DB and start the relay ────────────────────────
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -66,31 +67,11 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	if err := applyTestSchema(db); err != nil {
 		t.Fatalf("schema: %v", err)
 	}
-
-	// The stale session has a time_created 10 seconds in the past.  We set it
-	// to a definitive past value so that spawnStart (recorded just before the
-	// Discord message is dispatched) will always be AFTER it.
-	staleSessionID := "ses_stale_invariant1_binding"
-	staleCreatedAt := time.Now().UnixMilli() - 10_000
-	insertTestSession(t, db, staleSessionID, staleCreatedAt)
 	db.Close()
 
-	// Do NOT write a pending marker for the stale session.  This means
-	// scanSessions will see the stale session on each poll but won't find a
-	// matching marker → it treats the session as unmatched and skips it.
-	//
-	// The invariant under test: when the relay's spawn path (handleSpawnFromDiscord)
-	// later runs, it must poll the DB for sessions with time_created >= spawnStart
-	// and bind only those — never the stale session whose time_created < spawnStart.
-	//
-	// If the spawn path naively picked the "first unbound session" (by
-	// time_created order), it would pick the stale session erroneously.
-
-	// ── Step 2: Start the relay ───────────────────────────────────────────────
-	//
 	// FAKE_DP_FORCE_NEW_SESSION=1 prevents fake-devpass-code from auto-resuming
 	// the stale session when launched by dpmux.  This ensures a brand-new
-	// session row is created after spawnStart.
+	// session row with a nonce-bearing title is created after spawnStart.
 	relayCmd := exec.Command(relayBin)
 	relayCmd.Env = append(os.Environ(),
 		"DISCORD_TOKEN=test-token",
@@ -109,9 +90,33 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	}
 	t.Cleanup(func() { relayCmd.Process.Kill() })
 
-	// Allow the relay one poll cycle to see the stale session.  It will not
-	// pair it because the stale marker name won't match the real session id.
-	time.Sleep(1500 * time.Millisecond)
+	// Allow the relay one poll cycle to start watching before we insert the stale row.
+	time.Sleep(1200 * time.Millisecond)
+
+	// ── Step 2: Insert a stale row AFTER relay start, BEFORE spawn ────────────
+	//
+	// The stale session has:
+	//   - An id that sorts BEFORE any real session id ("ses_000..." < "ses_1...")
+	//   - A plain title (no "nonce:" prefix) so the nonce-based binder cannot match it
+	//   - time_created = now (which is after relay start but will be before spawnStart)
+	//
+	// This is the exact race the invariant test is guarding against: a process
+	// (e.g. another relay instance or a background task) creating a session row
+	// that, under a naive time-ordering binder, would be selected instead of the
+	// real spawn session.
+	db2, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleSessionID := "ses_000_stale_invariant1"
+	staleCreatedAt := time.Now().UnixMilli()
+	insertTestSession(t, db2, staleSessionID, staleCreatedAt)
+	db2.Close()
+	t.Logf("stale session inserted: id=%s (sorts first, no nonce, created after relay start)", staleSessionID)
+
+	// Allow one more poll cycle so the relay sees the stale row.
+	// The relay should not pair it (no matching nonce in title → no pending marker match).
+	time.Sleep(1200 * time.Millisecond)
 
 	// ── Step 3: Dispatch a channel message to trigger spawn ───────────────────
 	// spawnStart is recorded BEFORE the event is dispatched so it is strictly
@@ -128,7 +133,12 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	if err := dispatchEvent(mockPort, channelMsg); err != nil {
 		t.Fatalf("dispatch channel message: %v", err)
 	}
-	t.Logf("spawn triggered at spawnStart=%d", spawnStart)
+	t.Logf("spawn triggered at spawnStart=%d (stale row created at %d)", spawnStart, staleCreatedAt)
+
+	// Verify staleCreatedAt < spawnStart: the stale row was created before the spawn.
+	if staleCreatedAt >= spawnStart {
+		t.Logf("warning: stale row created at same ms as spawnStart; test may be less precise")
+	}
 
 	// ── Step 4: Wait for the relay to create a thread ─────────────────────────
 	var threadID string
@@ -170,17 +180,17 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	t.Log("✓ Invariant 1: stale session not bound; new session referenced in Discord")
 
 	// ── Step 6: Verify first prompt injected ─────────────────────────────────
-	// Find the new session: time_created >= spawnStart and id != staleSessionID.
-	db2, err := sql.Open("sqlite", dbPath)
+	// Find the new session: created after spawnStart, id != staleSessionID.
+	db3, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db2.Close()
+	defer db3.Close()
 
 	var newSessionID string
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		db2.QueryRow(
+		db3.QueryRow(
 			`SELECT id FROM session WHERE id != ? AND time_created >= ? AND parent_id IS NULL ORDER BY time_created ASC LIMIT 1`,
 			staleSessionID, spawnStart,
 		).Scan(&newSessionID)
@@ -192,9 +202,9 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	if newSessionID == "" {
 		t.Fatal("no new session row with time_created >= spawnStart in DB")
 	}
-	t.Logf("new session id: %s", newSessionID)
+	t.Logf("new session id: %s (sorts after stale %s: %v)", newSessionID, staleSessionID, newSessionID > staleSessionID)
 
-	if err := waitForUserPrompt(t, db2, newSessionID, "invariant1: this is the first prompt", 30*time.Second); err != nil {
+	if err := waitForUserPrompt(t, db3, newSessionID, "invariant1: this is the first prompt", 30*time.Second); err != nil {
 		t.Fatalf("first prompt not injected into new session: %v", err)
 	}
 	t.Log("✓ first prompt injected into the new (non-stale) session")

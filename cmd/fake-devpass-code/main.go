@@ -330,10 +330,18 @@ func applySchema(db *sql.DB) error {
 
 func insertSession(db *sql.DB, id string) error {
 	now := time.Now().UnixMilli()
+	// Embed RELAY_SPAWN_NONCE in the title so the relay can verify the binding
+	// is its own.  Format: "nonce:<hex>" when the env var is present; otherwise
+	// the title is "Fake Session" for compatibility with tests that don't use
+	// the nonce-based binding path.
+	title := "Fake Session"
+	if nonce := os.Getenv("RELAY_SPAWN_NONCE"); nonce != "" {
+		title = "nonce:" + nonce
+	}
 	_, err := db.Exec(
 		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
 		 VALUES(?,?,?,?,?,?,?,?)`,
-		id, "proj-fake", "fake-session", workdir(), "Fake Session", devpassVersion, now, now,
+		id, "proj-fake", "fake-session", workdir(), title, devpassVersion, now, now,
 	)
 	return err
 }

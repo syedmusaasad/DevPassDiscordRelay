@@ -140,6 +140,10 @@ func newDiscordGatewayClient(token, apiURL string) (*discordAdapter, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Disable discordgo's internal rate-limit retry so *discordgo.RateLimitError
+	// is returned to callers.  The relay handles 429 back-off itself in discordSend
+	// and discordEdit, feeding the result into the Throttle for future pacing.
+	s.ShouldRetryOnRateLimit = false
 	return &discordAdapter{s: s}, nil
 }
 
