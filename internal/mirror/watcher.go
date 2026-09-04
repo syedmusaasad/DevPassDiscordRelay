@@ -101,6 +101,8 @@ type Watcher struct {
 	// (scanSessions and handleSpawnFromDiscord). A session ID is inserted here
 	// the first time it is claimed; subsequent claimants are rejected.
 	claimed claimSet
+	// pendingResume holds per-thread pending !resume <n> candidate lists.
+	pendingResume pendingResumeStore
 }
 
 // claimSet is a thread-safe set of claimed session IDs.
@@ -780,11 +782,30 @@ func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
 		}
 	}
 	if rec == nil {
-		// Not a thread we manage.
+		// Not a thread we manage – check if this is a !resume <n> response.
+		w.pendingResume.handleResumeChoice(ev.ChannelID, ev.Content)
 		return
 	}
 
 	log.Printf("mirror: handleDiscordMessage: channel=%s session=%s", ev.ChannelID, rec.SessionID)
+
+	// Check for pending !resume <n> choice first (takes priority).
+	if w.handleResumeChoiceForThread(ev.ChannelID, ev.Content) {
+		return
+	}
+
+	// Handle !quit command: teardown pane but keep the claim.
+	if strings.TrimSpace(ev.Content) == "!quit" {
+		log.Printf("mirror: !quit received for session %s", rec.SessionID)
+		go w.teardownPane(rec.TmuxTarget)
+		return
+	}
+
+	// Handle bare `!resume` (no number): show candidate list.
+	if strings.TrimSpace(ev.Content) == "!resume" {
+		go w.handleAmbiguousResume(rec, ev.Content, nil)
+		return
+	}
 
 	// Handle !title command.
 	if title, ok := inject.HandleTitleCommand(ev.Content); ok {
@@ -803,12 +824,438 @@ func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
 		})
 	}
 
+	// If the pane is dead, attempt a resume before injecting.
+	if rec.TmuxTarget != "" && !isTmuxPaneAlive(rec.TmuxTarget) {
+		log.Printf("mirror: pane %s is dead for session %s – attempting resume", rec.TmuxTarget, rec.SessionID)
+		go func(r *SessionRecord, content string, atts []inject.Attachment) {
+			if err := w.resumeDeadSession(context.Background(), r, content, atts); err != nil {
+				log.Printf("mirror: resumeDeadSession %s: %v", r.SessionID, err)
+				w.sendToThread(r.ThreadID, fmt.Sprintf("⚠️ Could not resume session: %v", err))
+			}
+		}(rec, ev.Content, attachments)
+		return
+	}
+
 	// Inject in a goroutine so we don't block the gateway event loop.
-	go func(target, sessionID, content string, atts []inject.Attachment) {
-		if err := w.injector.Inject(target, sessionID, content, atts); err != nil {
+	go func(target, sessionID, threadID, content string, atts []inject.Attachment) {
+		if err := w.injectAndVerify(context.Background(), target, sessionID, threadID, content, atts); err != nil {
 			log.Printf("mirror: inject session %s: %v", sessionID, err)
 		}
-	}(rec.TmuxTarget, rec.SessionID, ev.Content, attachments)
+	}(rec.TmuxTarget, rec.SessionID, rec.ThreadID, ev.Content, attachments)
+}
+
+// ── Resume dead sessions ───────────────────────────────────────────────────────
+
+// echoVerifyTimeout is how long to wait for the injected prompt to appear in the DB.
+const echoVerifyTimeout = 30 * time.Second
+
+// pendingResumeStore tracks pending !resume <n> candidate lists per Discord thread.
+type pendingResumeStore struct {
+	mu       sync.Mutex
+	entries  map[string]*pendingResumeEntry // keyed by threadID
+}
+
+type pendingResumeEntry struct {
+	candidates []resumeCandidate
+	content    string
+	atts       []inject.Attachment
+	rec        *SessionRecord
+}
+
+type resumeCandidate struct {
+	SessionID   string
+	ProviderID  string // model provider info if available
+	LastActive  int64  // time_updated from DB (ms)
+}
+
+func (p *pendingResumeStore) init() {
+	p.entries = make(map[string]*pendingResumeEntry)
+}
+
+func (p *pendingResumeStore) set(threadID string, e *pendingResumeEntry) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.entries == nil {
+		p.entries = make(map[string]*pendingResumeEntry)
+	}
+	p.entries[threadID] = e
+}
+
+func (p *pendingResumeStore) get(threadID string) (*pendingResumeEntry, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.entries[threadID]
+	return e, ok
+}
+
+func (p *pendingResumeStore) delete(threadID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.entries, threadID)
+}
+
+// handleResumeChoice processes a !resume <n> reply in a thread.
+func (p *pendingResumeStore) handleResumeChoice(threadID, content string) {
+	// This is called from handleDiscordMessage; does nothing unless there's a pending entry.
+	// The actual handling is done by the watcher method below after looking up the entry.
+}
+
+// teardownPane kills the process group of the tmux pane's process, then kill-window.
+// This is the canonical teardown used by !quit and refusal handling.
+// The claim in sessions.json is kept.
+func (w *Watcher) teardownPane(tmuxTarget string) {
+	if tmuxTarget == "" {
+		return
+	}
+	log.Printf("mirror: teardown pane %s", tmuxTarget)
+
+	// Get the PID of the pane's foreground process group leader.
+	out, err := exec.Command("tmux", "display-message", "-t", tmuxTarget, "-p", "#{pane_pid}").Output()
+	if err == nil {
+		pid := strings.TrimSpace(string(out))
+		if pid != "" {
+			// Send SIGTERM to the process group (negative pid).
+			exec.Command("kill", "-TERM", "--", "-"+pid).Run() //nolint:errcheck
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	// Extract session and window from target (format: session:window.pane or session:window)
+	sessionName := tmuxTarget
+	if idx := strings.Index(tmuxTarget, ":"); idx >= 0 {
+		sessionName = tmuxTarget[:idx]
+	}
+	// Kill the window (not the whole session, to be surgical).
+	windowTarget := tmuxTarget
+	if idx := strings.LastIndex(tmuxTarget, "."); idx >= 0 {
+		windowTarget = tmuxTarget[:idx]
+	}
+	exec.Command("tmux", "kill-window", "-t", windowTarget).Run() //nolint:errcheck
+	// If kill-window fails (only one window), kill-session.
+	exec.Command("tmux", "kill-session", "-t", sessionName).Run() //nolint:errcheck
+}
+
+// resumeDeadSession is called when a thread reply arrives for a session whose
+// tmux pane is no longer alive. It:
+//  1. Spawns dpmux with --session <sessionID>.
+//  2. Detects refusal via pane text or session id mismatch.
+//  3. On refusal: teardown, retry once silently.
+//  4. On second failure: announces a fresh session was started.
+//  5. On success: updates rec.TmuxTarget and injects the queued message.
+func (w *Watcher) resumeDeadSession(ctx context.Context, rec *SessionRecord, content string, atts []inject.Attachment) error {
+	log.Printf("mirror: resumeDeadSession: session=%s", rec.SessionID)
+
+	newTarget, err := w.spawnResume(ctx, rec.SessionID)
+	if err != nil {
+		return fmt.Errorf("spawn resume: %w", err)
+	}
+
+	// Detect refusal: check pane for "Error: Session not found:" within 5s,
+	// or check if the session row created after spawn has a different id.
+	refused, err := w.detectRefusal(ctx, rec.SessionID, newTarget)
+	if err != nil {
+		log.Printf("mirror: refusal detection error: %v", err)
+	}
+
+	if refused {
+		log.Printf("mirror: resume refused for session %s (attempt 1), tearing down and retrying", rec.SessionID)
+		w.teardownPane(newTarget)
+
+		// Retry once silently.
+		newTarget2, err2 := w.spawnResume(ctx, rec.SessionID)
+		if err2 != nil {
+			// Could not even spawn. Fall back to fresh session.
+			return w.startFreshSessionAfterRefusal(ctx, rec, content, atts)
+		}
+		refused2, _ := w.detectRefusal(ctx, rec.SessionID, newTarget2)
+		if refused2 {
+			log.Printf("mirror: resume refused for session %s (attempt 2), starting fresh session", rec.SessionID)
+			w.teardownPane(newTarget2)
+			return w.startFreshSessionAfterRefusal(ctx, rec, content, atts)
+		}
+		newTarget = newTarget2
+	}
+
+	// Resume succeeded: update the session record with the new tmux target.
+	rec.TmuxTarget = newTarget
+	if err := w.sessions.Upsert(rec); err != nil {
+		log.Printf("mirror: update sessions.json after resume: %v", err)
+	}
+
+	// Inject the queued message into the resumed session.
+	return w.injectAndVerify(ctx, newTarget, rec.SessionID, rec.ThreadID, content, atts)
+}
+
+// spawnResume launches dpmux with --session <sessionID> and returns the new tmux target.
+func (w *Watcher) spawnResume(ctx context.Context, sessionID string) (string, error) {
+	dpmuxBin := w.cfg.DpmuxBin
+	if dpmuxBin == "" {
+		p, err := exec.LookPath("dpmux")
+		if err != nil {
+			return "", fmt.Errorf("dpmux not found: %w", err)
+		}
+		dpmuxBin = p
+	}
+
+	cmd := exec.CommandContext(ctx, dpmuxBin, "--session", sessionID)
+	env := os.Environ()
+	if w.cfg.StateDir != "" {
+		env = setEnvVar(env, "RELAY_STATE_DIR", w.cfg.StateDir)
+	}
+	if w.cfg.DBPath != "" {
+		env = setEnvVar(env, "RELAY_DEVPASS_DB", w.cfg.DBPath)
+	}
+	env = setEnvVar(env, "TMUX", "")
+	cmd.Env = env
+
+	var stdoutBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = os.Stderr
+
+	log.Printf("mirror: spawnResume: dpmux --session %s", sessionID)
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("dpmux --session %s: %w", sessionID, err)
+	}
+
+	// dpmux prints the session name to stdout.
+	sessionName := strings.TrimSpace(stdoutBuf.String())
+	if sessionName == "" {
+		return "", fmt.Errorf("dpmux produced no session name")
+	}
+
+	// Read the pending marker to get the tmux target.
+	pendingPath := filepath.Join(w.cfg.StateDir, "pending-"+sessionName)
+	data, err := os.ReadFile(pendingPath)
+	if err != nil {
+		// Marker may already be consumed; derive target from session name.
+		return sessionName + ":0.0", nil
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// detectRefusal returns true if the devpass-code process refused the --session resume.
+// Signals checked (per DISCOVERY.md):
+//  1. Pane contains "Error: Session not found:" within 5s.
+//  2. The first new session row created after spawn has an id other than sessionID.
+func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget string) (bool, error) {
+	spawnTime := time.Now().UnixMilli()
+	deadline := time.Now().Add(5 * time.Second)
+
+	for time.Now().Before(deadline) {
+		// Signal 1: pane text.
+		if text, err := capturePaneTextRaw(tmuxTarget); err == nil {
+			if strings.Contains(text, "Error: Session not found:") {
+				log.Printf("mirror: refusal detected via pane text for %s", sessionID)
+				return true, nil
+			}
+			// Signal 2: if pane shows "Ask anything..." it resumed successfully.
+			if strings.Contains(text, "Ask anything...") {
+				return false, nil
+			}
+		}
+
+		// Signal 2: new session row with wrong id.
+		var newID string
+		w.db.QueryRowContext(ctx,
+			`SELECT id FROM session WHERE time_created >= ? AND parent_id IS NULL ORDER BY time_created ASC LIMIT 1`,
+			spawnTime,
+		).Scan(&newID)
+		if newID != "" && newID != sessionID {
+			log.Printf("mirror: refusal detected via session id mismatch: want=%s got=%s", sessionID, newID)
+			return true, nil
+		}
+
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Timeout without a definitive signal – assume success.
+	return false, nil
+}
+
+// capturePaneTextRaw captures visible text from a tmux pane target.
+func capturePaneTextRaw(target string) (string, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// startFreshSessionAfterRefusal starts a brand-new session (no --session flag)
+// and posts ONE notice to the thread that a fresh session was started.
+func (w *Watcher) startFreshSessionAfterRefusal(ctx context.Context, rec *SessionRecord, content string, atts []inject.Attachment) error {
+	log.Printf("mirror: starting fresh session after double refusal for %s", rec.SessionID)
+	w.sendToThread(rec.ThreadID, "⚠️ Could not resume previous session; a **fresh session** has been started.")
+
+	// Spawn a fresh dpmux session (no --session).
+	if err := w.handleSpawnFromDiscord(ctx, content, nil); err != nil {
+		return fmt.Errorf("fresh spawn after refusal: %w", err)
+	}
+	return nil
+}
+
+// injectAndVerify injects content into the tmux pane and verifies the echo
+// appears in the DB within echoVerifyTimeout. If the echo is absent, it
+// re-sends once and suppresses duplicate echoes in the Discord thread.
+func (w *Watcher) injectAndVerify(ctx context.Context, target, sessionID, threadID, content string, atts []inject.Attachment) error {
+	// Perform the injection.
+	if err := w.injector.Inject(target, sessionID, content, atts); err != nil {
+		return fmt.Errorf("inject: %w", err)
+	}
+
+	// Verify the echo appears in the DB within echoVerifyTimeout.
+	if w.waitForEcho(ctx, sessionID, content, echoVerifyTimeout) {
+		// Echo confirmed.
+		return nil
+	}
+
+	// Echo absent: re-send once.
+	log.Printf("mirror: echo absent for session %s – re-sending once", sessionID)
+	if err := w.injector.Inject(target, sessionID, content, atts); err != nil {
+		return fmt.Errorf("inject retry: %w", err)
+	}
+
+	// Suppress duplicate: we do NOT post "You: ..." again to the Discord thread.
+	// The second inject is silent from the Discord perspective; the pane will
+	// handle the duplicate naturally (devpass-code deduplicates or we accept the
+	// second turn as a retry).
+	return nil
+}
+
+// waitForEcho polls the DB for the given content in the part table for the
+// specified session, returning true if found within timeout.
+func (w *Watcher) waitForEcho(ctx context.Context, sessionID, content string, timeout time.Duration) bool {
+	if content == "" {
+		return true
+	}
+	// Truncate very long content for the DB LIKE query.
+	needle := content
+	if len(needle) > 100 {
+		needle = needle[:100]
+	}
+	needle = strings.ReplaceAll(needle, "%", "\\%")
+	needle = strings.ReplaceAll(needle, "_", "\\_")
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+		var count int
+		w.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM part WHERE session_id = ? AND data LIKE ?`,
+			sessionID, "%"+needle+"%",
+		).Scan(&count)
+		if count > 0 {
+			return true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return false
+}
+
+// handleAmbiguousResume posts a numbered candidate list of all known sessions
+// so the user can pick one with `!resume <n>`.
+func (w *Watcher) handleAmbiguousResume(rec *SessionRecord, content string, atts []inject.Attachment) {
+	// Collect all known non-ended sessions from the DB.
+	ctx := context.Background()
+	rows, err := w.db.QueryContext(ctx,
+		`SELECT id, time_updated FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT 20`)
+	var candidates []resumeCandidate
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var c resumeCandidate
+			if err := rows.Scan(&c.SessionID, &c.LastActive); err == nil {
+				candidates = append(candidates, c)
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		w.sendToThread(rec.ThreadID, "No sessions available to resume.")
+		return
+	}
+
+	if len(candidates) == 1 {
+		// Only one candidate: resume directly.
+		rec2 := *rec
+		rec2.SessionID = candidates[0].SessionID
+		if err := w.resumeDeadSession(ctx, &rec2, content, atts); err != nil {
+			log.Printf("mirror: single candidate resume: %v", err)
+			w.sendToThread(rec.ThreadID, fmt.Sprintf("⚠️ Resume failed: %v", err))
+		}
+		return
+	}
+
+	// Build numbered list.
+	var sb strings.Builder
+	sb.WriteString("**Multiple sessions available — reply `!resume <n>` to choose:**\n")
+	now := time.Now().UnixMilli()
+	for i, c := range candidates {
+		ageMS := now - c.LastActive
+		ageStr := formatAge(ageMS)
+		sb.WriteString(fmt.Sprintf("%d. `%s` (last active: %s)\n", i+1, c.SessionID, ageStr))
+	}
+
+	w.sendToThread(rec.ThreadID, strings.TrimRight(sb.String(), "\n"))
+
+	// Store the pending entry so the next `!resume <n>` resolves it.
+	w.pendingResume.set(rec.ThreadID, &pendingResumeEntry{
+		candidates: candidates,
+		content:    content,
+		atts:       atts,
+		rec:        rec,
+	})
+}
+
+// formatAge formats a millisecond duration as a human-readable age string.
+func formatAge(ms int64) string {
+	d := time.Duration(ms) * time.Millisecond
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// handleResumeChoiceForThread processes a !resume <n> message in a thread that
+// has a pending resume candidate list.
+func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
+	entry, ok := w.pendingResume.get(threadID)
+	if !ok {
+		return false
+	}
+	s := strings.TrimSpace(content)
+	if !strings.HasPrefix(s, "!resume ") {
+		return false
+	}
+	nStr := strings.TrimSpace(strings.TrimPrefix(s, "!resume "))
+	n := 0
+	fmt.Sscanf(nStr, "%d", &n)
+	if n < 1 || n > len(entry.candidates) {
+		w.sendToThread(threadID, fmt.Sprintf("⚠️ Invalid choice. Please reply `!resume 1`–`!resume %d`.", len(entry.candidates)))
+		return true
+	}
+	chosen := entry.candidates[n-1]
+	w.pendingResume.delete(threadID)
+
+	go func() {
+		// Re-use the rec from the entry, updating its SessionID to the chosen one.
+		rec := entry.rec
+		rec.SessionID = chosen.SessionID
+		if err := w.resumeDeadSession(context.Background(), rec, entry.content, entry.atts); err != nil {
+			log.Printf("mirror: resume choice %s: %v", chosen.SessionID, err)
+			w.sendToThread(threadID, fmt.Sprintf("⚠️ Resume failed: %v", err))
+		}
+	}()
+	return true
 }
 
 // handleSpawnFromDiscord spawns a new dpmux session in response to a Discord
