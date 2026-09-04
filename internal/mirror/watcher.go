@@ -103,6 +103,38 @@ type Watcher struct {
 	claimed claimSet
 	// pendingResume holds per-thread pending !resume <n> candidate lists.
 	pendingResume pendingResumeStore
+	// suppressedEchoes tracks (sessionID, promptText) pairs whose Discord echo
+	// has already been posted once. A second appearance of the same prompt in
+	// the DB (due to inject retry) must not be posted again.
+	suppressedEchoes suppressedEchoStore
+}
+
+// suppressedEchoStore tracks prompt texts that have already been echoed to
+// Discord for a given session, so the retry path can suppress duplicates.
+type suppressedEchoStore struct {
+	mu      sync.Mutex
+	entries map[string]map[string]bool // sessionID -> set of prompt texts
+}
+
+func (s *suppressedEchoStore) add(sessionID, prompt string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries == nil {
+		s.entries = make(map[string]map[string]bool)
+	}
+	if s.entries[sessionID] == nil {
+		s.entries[sessionID] = make(map[string]bool)
+	}
+	s.entries[sessionID][prompt] = true
+}
+
+func (s *suppressedEchoStore) has(sessionID, prompt string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.entries == nil {
+		return false
+	}
+	return s.entries[sessionID][prompt]
 }
 
 // claimSet is a thread-safe set of claimed session IDs.
@@ -424,24 +456,33 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 			case PartKindPreamble:
 				// Skip preamble parts – do NOT count as user prompts
 
-			case PartKindText:
-				if ms.role == "user" && !ms.isPreamble && !ms.promptEchoed {
-					// Echo user prompt (truncated to 300 chars)
-					prompt := cp.Text
-					runes := []rune(prompt)
-					if len(runes) > 300 {
-						prompt = string(runes[:297]) + "..."
-					}
-					if prompt != "" {
-						ms.promptEchoed = true
-						w.sendToThread(threadID, fmt.Sprintf("**You:** %s", prompt))
-					}
-				} else if ms.role == "assistant" {
-					// Accumulate and stream assistant text
-					ms.text += cp.Text
-					ms.hadOutput = true
-					w.updateTextMessage(threadID, ms)
+		case PartKindText:
+			if ms.role == "user" && !ms.isPreamble && !ms.promptEchoed {
+				// Echo user prompt (truncated to 300 chars)
+				prompt := cp.Text
+				runes := []rune(prompt)
+				if len(runes) > 300 {
+					prompt = string(runes[:297]) + "..."
 				}
+				if prompt != "" {
+					ms.promptEchoed = true
+					// Suppress duplicate echo: if injectAndVerify already echoed this
+					// prompt (because it had to retry the injection), skip the second
+					// Discord post.  Use the raw cp.Text for the suppression key (before
+					// truncation) so the check is length-invariant.
+					if !w.suppressedEchoes.has(sessionID, cp.Text) {
+						w.sendToThread(threadID, fmt.Sprintf("**You:** %s", prompt))
+					} else {
+						log.Printf("mirror: suppressed duplicate echo for session %s", sessionID)
+					}
+				}
+			} else if ms.role == "assistant" {
+				// Accumulate and stream assistant text
+				ms.text += cp.Text
+				ms.hadOutput = true
+				w.updateTextMessage(threadID, ms)
+			}
+
 
 			case PartKindToolCall:
 				if ms.role == "assistant" {
@@ -782,8 +823,10 @@ func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
 		}
 	}
 	if rec == nil {
-		// Not a thread we manage – check if this is a !resume <n> response.
-		w.pendingResume.handleResumeChoice(ev.ChannelID, ev.Content)
+		// Not a thread we manage directly, but it may have a pending !resume <n>
+		// entry (e.g., from handleAmbiguousResume on a now-ended session).
+		// Route through the real handler so the choice is never silently dropped.
+		w.handleResumeChoiceForThread(ev.ChannelID, ev.Content)
 		return
 	}
 
@@ -894,16 +937,22 @@ func (p *pendingResumeStore) delete(threadID string) {
 	delete(p.entries, threadID)
 }
 
-// handleResumeChoice processes a !resume <n> reply in a thread.
-func (p *pendingResumeStore) handleResumeChoice(threadID, content string) {
-	// This is called from handleDiscordMessage; does nothing unless there's a pending entry.
-	// The actual handling is done by the watcher method below after looking up the entry.
-}
-
 // teardownPane kills the process group of the tmux pane's process, then kill-window.
 // This is the canonical teardown used by !quit and refusal handling.
 // The claim in sessions.json is kept.
+// Only the window is killed, not the whole session, to be surgical.
 func (w *Watcher) teardownPane(tmuxTarget string) {
+	teardownPaneTarget(tmuxTarget)
+}
+
+// TeardownPane is the exported variant used in tests.
+func TeardownPane(tmuxTarget string) {
+	teardownPaneTarget(tmuxTarget)
+}
+
+// teardownPaneTarget implements the actual teardown logic.
+// Sends SIGTERM to the pane's process group, then kills the tmux window only.
+func teardownPaneTarget(tmuxTarget string) {
 	if tmuxTarget == "" {
 		return
 	}
@@ -920,19 +969,12 @@ func (w *Watcher) teardownPane(tmuxTarget string) {
 		}
 	}
 
-	// Extract session and window from target (format: session:window.pane or session:window)
-	sessionName := tmuxTarget
-	if idx := strings.Index(tmuxTarget, ":"); idx >= 0 {
-		sessionName = tmuxTarget[:idx]
-	}
-	// Kill the window (not the whole session, to be surgical).
+	// Kill only the window (never the whole session) — surgical teardown.
 	windowTarget := tmuxTarget
 	if idx := strings.LastIndex(tmuxTarget, "."); idx >= 0 {
 		windowTarget = tmuxTarget[:idx]
 	}
 	exec.Command("tmux", "kill-window", "-t", windowTarget).Run() //nolint:errcheck
-	// If kill-window fails (only one window), kill-session.
-	exec.Command("tmux", "kill-session", "-t", sessionName).Run() //nolint:errcheck
 }
 
 // resumeDeadSession is called when a thread reply arrives for a session whose
@@ -945,14 +987,18 @@ func (w *Watcher) teardownPane(tmuxTarget string) {
 func (w *Watcher) resumeDeadSession(ctx context.Context, rec *SessionRecord, content string, atts []inject.Attachment) error {
 	log.Printf("mirror: resumeDeadSession: session=%s", rec.SessionID)
 
+	// Take DB baseline BEFORE spawning so any new session row created during
+	// spawn is visible to detectRefusal (never miss a foreign-id creation).
+	baselineMS := time.Now().UnixMilli()
+
 	newTarget, err := w.spawnResume(ctx, rec.SessionID)
 	if err != nil {
 		return fmt.Errorf("spawn resume: %w", err)
 	}
 
 	// Detect refusal: check pane for "Error: Session not found:" within 5s,
-	// or check if the session row created after spawn has a different id.
-	refused, err := w.detectRefusal(ctx, rec.SessionID, newTarget)
+	// or check if a new session row with a foreign id was created since baseline.
+	refused, err := w.detectRefusal(ctx, rec.SessionID, newTarget, baselineMS)
 	if err != nil {
 		log.Printf("mirror: refusal detection error: %v", err)
 	}
@@ -961,13 +1007,14 @@ func (w *Watcher) resumeDeadSession(ctx context.Context, rec *SessionRecord, con
 		log.Printf("mirror: resume refused for session %s (attempt 1), tearing down and retrying", rec.SessionID)
 		w.teardownPane(newTarget)
 
-		// Retry once silently.
+		// Retry once silently — take a fresh baseline before the second spawn.
+		baseline2MS := time.Now().UnixMilli()
 		newTarget2, err2 := w.spawnResume(ctx, rec.SessionID)
 		if err2 != nil {
 			// Could not even spawn. Fall back to fresh session.
 			return w.startFreshSessionAfterRefusal(ctx, rec, content, atts)
 		}
-		refused2, _ := w.detectRefusal(ctx, rec.SessionID, newTarget2)
+		refused2, _ := w.detectRefusal(ctx, rec.SessionID, newTarget2, baseline2MS)
 		if refused2 {
 			log.Printf("mirror: resume refused for session %s (attempt 2), starting fresh session", rec.SessionID)
 			w.teardownPane(newTarget2)
@@ -1033,12 +1080,20 @@ func (w *Watcher) spawnResume(ctx context.Context, sessionID string) (string, er
 	return strings.TrimSpace(string(data)), nil
 }
 
+// DetectRefusal is the exported variant of detectRefusal used in tests.
+func (w *Watcher) DetectRefusal(ctx context.Context, sessionID, tmuxTarget string, baselineMS int64) (bool, error) {
+	return w.detectRefusal(ctx, sessionID, tmuxTarget, baselineMS)
+}
+
 // detectRefusal returns true if the devpass-code process refused the --session resume.
+// baselineMS is the Unix-millisecond timestamp taken BEFORE spawnResume was called;
+// any new session row with time_created >= baselineMS and an id other than sessionID
+// is evidence of refusal.
 // Signals checked (per DISCOVERY.md):
 //  1. Pane contains "Error: Session not found:" within 5s.
-//  2. The first new session row created after spawn has an id other than sessionID.
-func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget string) (bool, error) {
-	spawnTime := time.Now().UnixMilli()
+//  2. The first new session row created after baseline has an id other than sessionID.
+//  3. Pane shows "Ask anything..." (success).
+func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget string, baselineMS int64) (bool, error) {
 	deadline := time.Now().Add(5 * time.Second)
 
 	for time.Now().Before(deadline) {
@@ -1048,8 +1103,19 @@ func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 				log.Printf("mirror: refusal detected via pane text for %s", sessionID)
 				return true, nil
 			}
-			// Signal 2: if pane shows "Ask anything..." it resumed successfully.
+			// Signal 3: if pane shows "Ask anything..." it resumed successfully —
+			// but only accept if no foreign session row exists since baseline.
 			if strings.Contains(text, "Ask anything...") {
+				// Still check for foreign-id (defence-in-depth).
+				var newID string
+				w.db.QueryRowContext(ctx,
+					`SELECT id FROM session WHERE time_created >= ? AND parent_id IS NULL ORDER BY time_created ASC LIMIT 1`,
+					baselineMS,
+				).Scan(&newID)
+				if newID != "" && newID != sessionID {
+					log.Printf("mirror: refusal detected via session id mismatch (ready pane): want=%s got=%s", sessionID, newID)
+					return true, nil
+				}
 				return false, nil
 			}
 		}
@@ -1058,7 +1124,7 @@ func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 		var newID string
 		w.db.QueryRowContext(ctx,
 			`SELECT id FROM session WHERE time_created >= ? AND parent_id IS NULL ORDER BY time_created ASC LIMIT 1`,
-			spawnTime,
+			baselineMS,
 		).Scan(&newID)
 		if newID != "" && newID != sessionID {
 			log.Printf("mirror: refusal detected via session id mismatch: want=%s got=%s", sessionID, newID)
@@ -1104,20 +1170,25 @@ func (w *Watcher) injectAndVerify(ctx context.Context, target, sessionID, thread
 
 	// Verify the echo appears in the DB within echoVerifyTimeout.
 	if w.waitForEcho(ctx, sessionID, content, echoVerifyTimeout) {
-		// Echo confirmed.
+		// Echo confirmed — record as echoed so mirrorContent won't double-post.
+		// (The first inject already triggered the "You: …" post in mirrorContent;
+		//  this is a no-op if mirrorContent hasn't seen the row yet.)
 		return nil
 	}
 
 	// Echo absent: re-send once.
 	log.Printf("mirror: echo absent for session %s – re-sending once", sessionID)
+	// Mark the prompt as already-echoed BEFORE the retry so mirrorContent suppresses
+	// the second user-prompt row if the fake echoes both turns.
+	w.suppressedEchoes.add(sessionID, content)
 	if err := w.injector.Inject(target, sessionID, content, atts); err != nil {
 		return fmt.Errorf("inject retry: %w", err)
 	}
 
-	// Suppress duplicate: we do NOT post "You: ..." again to the Discord thread.
-	// The second inject is silent from the Discord perspective; the pane will
-	// handle the duplicate naturally (devpass-code deduplicates or we accept the
-	// second turn as a retry).
+	// Suppress duplicate: the Discord echo for this prompt was already posted (or
+	// will be posted) by mirrorContent for the first user-prompt row. Any second
+	// user-prompt row with identical text must not be re-posted to the thread.
+	// The suppressedEchoes entry ensures mirrorContent skips the duplicate.
 	return nil
 }
 
@@ -1158,7 +1229,7 @@ func (w *Watcher) waitForEcho(ctx context.Context, sessionID, content string, ti
 // handleAmbiguousResume posts a numbered candidate list of all known sessions
 // so the user can pick one with `!resume <n>`.
 func (w *Watcher) handleAmbiguousResume(rec *SessionRecord, content string, atts []inject.Attachment) {
-	// Collect all known non-ended sessions from the DB.
+	// Collect all known sessions from the DB, newest first.
 	ctx := context.Background()
 	rows, err := w.db.QueryContext(ctx,
 		`SELECT id, time_updated FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT 20`)
@@ -1171,6 +1242,11 @@ func (w *Watcher) handleAmbiguousResume(rec *SessionRecord, content string, atts
 				candidates = append(candidates, c)
 			}
 		}
+	}
+
+	// Enrich each candidate with the provider from its most recent assistant message.
+	for i := range candidates {
+		candidates[i].ProviderID = w.fetchSessionProvider(ctx, candidates[i].SessionID)
 	}
 
 	if len(candidates) == 0 {
@@ -1189,14 +1265,18 @@ func (w *Watcher) handleAmbiguousResume(rec *SessionRecord, content string, atts
 		return
 	}
 
-	// Build numbered list.
+	// Build numbered list with provider and last-active age.
 	var sb strings.Builder
 	sb.WriteString("**Multiple sessions available — reply `!resume <n>` to choose:**\n")
 	now := time.Now().UnixMilli()
 	for i, c := range candidates {
 		ageMS := now - c.LastActive
 		ageStr := formatAge(ageMS)
-		sb.WriteString(fmt.Sprintf("%d. `%s` (last active: %s)\n", i+1, c.SessionID, ageStr))
+		provider := c.ProviderID
+		if provider == "" {
+			provider = "unknown"
+		}
+		sb.WriteString(fmt.Sprintf("%d. `%s` | provider: `%s` | last active: %s\n", i+1, c.SessionID, provider, ageStr))
 	}
 
 	w.sendToThread(rec.ThreadID, strings.TrimRight(sb.String(), "\n"))
@@ -1208,6 +1288,30 @@ func (w *Watcher) handleAmbiguousResume(rec *SessionRecord, content string, atts
 		atts:       atts,
 		rec:        rec,
 	})
+}
+
+// fetchSessionProvider returns the provider ID from the most recent assistant
+// message in the session. The provider is stored in message.data JSON as
+// model.providerID (per TRANSCRIPT-SCHEMA.md).
+func (w *Watcher) fetchSessionProvider(ctx context.Context, sessionID string) string {
+	// Find the most recent assistant message for this session.
+	var data string
+	err := w.db.QueryRowContext(ctx,
+		`SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC LIMIT 1`,
+		sessionID,
+	).Scan(&data)
+	if err != nil || data == "" {
+		return ""
+	}
+	var md struct {
+		Model struct {
+			ProviderID string `json:"providerID"`
+		} `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(data), &md); err != nil {
+		return ""
+	}
+	return md.Model.ProviderID
 }
 
 // formatAge formats a millisecond duration as a human-readable age string.

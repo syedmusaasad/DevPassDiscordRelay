@@ -1,9 +1,13 @@
 package mirror
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // mock429DiscordClient is a DiscordClient where SendMessage returns a 429-style
@@ -90,9 +94,9 @@ func TestThrottle_429Backoff(t *testing.T) {
 // TestExtractRetryAfter verifies the error-string parser for discordgo-style rate-limit errors.
 func TestExtractRetryAfter(t *testing.T) {
 	cases := []struct {
-		err     error
-		want    time.Duration
-		wantOK  bool
+		err    error
+		want   time.Duration
+		wantOK bool
 	}{
 		{
 			err:    fmt.Errorf("Rate limit exceeded on /api/v10/channels/123/messages, retry after 500ms"),
@@ -125,5 +129,114 @@ func TestExtractRetryAfter(t *testing.T) {
 		if ok && got != tc.want {
 			t.Errorf("extractRetryAfter(%v): got %v, want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+// ── Refusal detection tests ───────────────────────────────────────────────────
+
+// testDB creates a minimal in-memory SQLite database with the session schema.
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open test DB: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS project (id text PRIMARY KEY, name text NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS session (
+			id text PRIMARY KEY,
+			project_id text NOT NULL,
+			workspace_id text,
+			parent_id text,
+			slug text NOT NULL,
+			directory text NOT NULL,
+			path text,
+			title text NOT NULL,
+			version text NOT NULL,
+			share_url text,
+			summary_additions integer,
+			summary_deletions integer,
+			summary_files integer,
+			summary_diffs text,
+			metadata text,
+			cost real DEFAULT 0 NOT NULL,
+			tokens_input integer DEFAULT 0 NOT NULL,
+			tokens_output integer DEFAULT 0 NOT NULL,
+			tokens_reasoning integer DEFAULT 0 NOT NULL,
+			tokens_cache_read integer DEFAULT 0 NOT NULL,
+			tokens_cache_write integer DEFAULT 0 NOT NULL,
+			revert text,
+			permission text,
+			agent text,
+			model text,
+			time_created integer NOT NULL,
+			time_updated integer NOT NULL,
+			time_compacting integer,
+			time_archived integer,
+			CONSTRAINT fk_session_project_id_project_id_fk FOREIGN KEY (project_id) REFERENCES project(id) ON DELETE CASCADE
+		);
+		INSERT OR IGNORE INTO project(id, name) VALUES('proj-test','test');
+	`)
+	if err != nil {
+		t.Fatalf("init test DB: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+// TestDetectRefusal_ForeignIDNoPaneText verifies that detectRefusal returns true
+// when a new session row with a DIFFERENT id appears in the DB since the baseline,
+// even when the tmux pane is completely absent (no "Error: Session not found:"
+// text is available in the pane).
+//
+// This exercises the baseline-before-spawn contract: success requires BOTH the
+// pane to be ready AND no new session row with a foreign id since the baseline.
+func TestDetectRefusal_ForeignIDNoPaneText(t *testing.T) {
+	db := testDB(t)
+
+	stateDir := t.TempDir()
+	sessions, err := LoadSessions(stateDir + "/sessions.json")
+	if err != nil {
+		t.Fatalf("load sessions: %v", err)
+	}
+
+	w := &Watcher{
+		db:       db,
+		sessions: sessions,
+		throttle: NewThrottle(10, 5*time.Second),
+		discord:  &mock429DiscordClient{},
+	}
+
+	wantSessionID := "ses_wanted_001"
+	foreignSessionID := "ses_foreign_001"
+
+	// Baseline is taken NOW (before the foreign insert simulates a spawn).
+	baselineMS := time.Now().UnixMilli()
+
+	// Simulate: after spawn, a foreign session row is created (wrong id).
+	// No pane text is available (target is empty / dead).
+	now := time.Now().UnixMilli()
+	_, err = db.Exec(
+		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		foreignSessionID, "proj-test", "slug", "/tmp", "Foreign", "1.0", now, now,
+	)
+	if err != nil {
+		t.Fatalf("insert foreign session: %v", err)
+	}
+
+	// detectRefusal must detect the foreign id even though the pane target is
+	// nonexistent (tmux capture-pane will fail, so no "Error:" text).
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	refused, detectErr := w.detectRefusal(ctx, wantSessionID, "nonexistent-target:0.0", baselineMS)
+	if detectErr != nil {
+		t.Logf("detectRefusal returned error (acceptable): %v", detectErr)
+	}
+	if !refused {
+		t.Errorf("expected detectRefusal to return true for foreign session id (got false)")
+	} else {
+		t.Logf("✓ detectRefusal correctly identified foreign id as refusal (no pane text needed)")
 	}
 }

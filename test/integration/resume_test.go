@@ -6,7 +6,6 @@ package integration
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -28,7 +27,8 @@ import (
 // Setup uses FAKE_DP_SWALLOW_UNTIL_READY=1 so the first keystroke is swallowed
 // before the ready prompt is shown. This means the relay's inject call returns
 // before the text is processed, causing the echo-verification loop to detect
-// the absent echo and re-send once.
+// the absent echo and re-send once.  After the retry the prompt MUST appear in
+// the DB AND the Discord thread echo must appear exactly once (duplicate suppression).
 func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	mustBin(t, "tmux")
 	fakeDP := mustBin(t, "fake-devpass-code")
@@ -62,9 +62,11 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	insertTestSession(t, db, sessionID, now)
 	db.Close()
 
-	// Start fake-devpass-code with a ready delay and swallow-until-ready so the
-	// first keystroke is silently discarded. This forces the relay's echo-verify
-	// loop to detect absence and re-send once.
+	// Start fake-devpass-code with:
+	//   FAKE_DP_READY_DELAY_MS=800    — delays the ready prompt by 800ms
+	//   FAKE_DP_SWALLOW_UNTIL_READY=1 — stdin is drained during the delay,
+	//                                   so the first inject is discarded and
+	//                                   the relay's echo-verify loop must retry.
 	sessionName := "dp-echo-verify"
 	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
 
@@ -74,7 +76,8 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 		"env",
 		fmt.Sprintf("XDG_DATA_HOME=%s", xdgHome),
 		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
-		"FAKE_DP_READY_DELAY_MS=500",
+		"FAKE_DP_READY_DELAY_MS=800",
+		"FAKE_DP_SWALLOW_UNTIL_READY=1",
 		fakeDP, "--auto", "--session", sessionID,
 	)
 	if out, err := dpCmd.CombinedOutput(); err != nil {
@@ -117,14 +120,22 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	// Give relay time to register the session.
 	time.Sleep(300 * time.Millisecond)
 
-	// Dispatch a MESSAGE_CREATE to the thread. The relay will wait for "Ask anything..."
-	// (ready probe), then inject the text and verify the echo in the DB.
+	// Clear sent messages so we can count the echo precisely.
+	clearSentMessages(mockPort)
+
+	// Dispatch a MESSAGE_CREATE to the thread. The relay will:
+	//  1. Wait for "Ask anything..." (ready probe — delayed by 800ms).
+	//  2. Inject the text. FAKE_DP_SWALLOW_UNTIL_READY=1 discards stdin during
+	//     the ready delay, so the first inject is lost.
+	//  3. Wait 30 s for echo in DB → not found.
+	//  4. Re-send once. The fake processes the second inject and writes the row.
+	//  5. suppressedEchoes suppresses the second "You: …" from mirrorContent.
 	msgEvent := buildMessageEvent("msg-echo-001", threadID, "user-echo-001", false, "echo verification probe", nil)
 	if err := dispatchEvent(mockPort, msgEvent); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
 
-	// Wait for the echo to appear in the DB.
+	// Wait for the echo to appear in the DB (up to 40 s to cover the 30 s verify window).
 	db2, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -136,16 +147,32 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	}
 	t.Log("✓ Invariant 3: injection echo appeared in DB (echo verification confirmed)")
 
-	// Verify at least one occurrence exists.
-	var count int
+	// Assert: the prompt appears at least once in the DB.
+	var dbCount int
 	db2.QueryRow(
 		`SELECT COUNT(*) FROM part WHERE session_id = ? AND data LIKE ?`,
 		sessionID, "%echo verification probe%",
-	).Scan(&count)
-	if count < 1 {
-		t.Errorf("expected at least 1 echo occurrence in DB, got %d", count)
+	).Scan(&dbCount)
+	if dbCount < 1 {
+		t.Errorf("expected at least 1 echo in DB, got %d", dbCount)
 	}
-	t.Logf("✓ echo appeared %d time(s) in DB", count)
+	t.Logf("✓ echo appeared %d time(s) in DB", dbCount)
+
+	// Assert: the Discord thread shows "You: echo verification probe" exactly once.
+	// Allow a brief settling window for the relay to post after the echo appears.
+	time.Sleep(500 * time.Millisecond)
+	msgs, _ := getSentMessages(mockPort)
+	youCount := 0
+	for _, m := range msgs {
+		c := contentOf(m)
+		if strings.Contains(c, "You:") && strings.Contains(c, "echo verification probe") {
+			youCount++
+		}
+	}
+	if youCount != 1 {
+		t.Errorf("expected exactly 1 'You: echo verification probe' in Discord thread, got %d", youCount)
+	}
+	t.Logf("✓ Invariant 3: Discord echo count = %d (expected 1, duplicate suppression working)", youCount)
 }
 
 // ── TestInvariant4_ResumeRefusalRetry ────────────────────────────────────────
@@ -345,15 +372,23 @@ echo "$SESSION_NAME"
 // ── TestInvariant4_AmbiguousIdCandidateList ───────────────────────────────────
 //
 // Invariant 4b: when `!resume` is issued without a session number and multiple
-// candidate sessions exist, the relay posts a numbered candidate list and waits
-// for `!resume <n>`. Replying `!resume 1` causes the relay to attempt the
-// resume of the first candidate.
+// candidate sessions exist, the relay posts a numbered candidate list including
+// the provider name and last-active age. Replying `!resume 1` causes the relay
+// to attempt the resume of the first candidate.
+//
+// Design: sessions.json is pre-populated with two sessions (both with dead tmux
+// targets and known thread IDs). The DB is seeded with both sessions and their
+// messages (including provider info). The relay loads sessions.json on startup
+// and already knows about both threads.  We then dispatch bare `!resume` to
+// threadA.  The relay calls handleAmbiguousResume, queries the DB for all
+// sessions (finds 2), and posts the numbered candidate list.
+//
+// This avoids the timing race of creating two panes concurrently, since the
+// relay never needs to call mirrorSession for pre-tracked sessions.
 func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 	mustBin(t, "tmux")
-	fakeDP := mustBin(t, "fake-devpass-code")
 	relayBin := mustBin(t, "relay")
 	mockDS := mustBin(t, "mock-discord")
-	_ = fakeDP // used indirectly via relay config
 
 	xdgHome := t.TempDir()
 	stateDir := t.TempDir()
@@ -366,7 +401,7 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 		t.Fatalf("mock-discord not ready: %v", err)
 	}
 
-	// Create DB with two sessions so `!resume` without a number is ambiguous.
+	// Create DB with two sessions and messages (including provider info).
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -379,49 +414,67 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 	}
 
 	now := time.Now().UnixMilli()
-	sessionA := "ses_ambig_cand_A001"
-	sessionB := "ses_ambig_cand_B001"
+	sessionA := "ses_ambig_A001"
+	sessionB := "ses_ambig_B001"
 	insertTestSession(t, db, sessionA, now-5000)
 	insertTestSession(t, db, sessionB, now-2000)
 
-	// Insert assistant turns for both sessions so the relay creates threads.
-	for i, sid := range []string{sessionA, sessionB} {
-		ts := now + int64(i*300)
-		msgID := fmt.Sprintf("msg_ambig_asst_%d", i)
-		pss := fmt.Sprintf("prt_ambig_ss_%d", i)
-		ptxt := fmt.Sprintf("prt_ambig_txt_%d", i)
-		psf := fmt.Sprintf("prt_ambig_sf_%d", i)
-		insertTestMessage(t, db, msgID, sid, "assistant", ts+50)
-		insertTestPart(t, db, pss, msgID, sid, ts+51, `{"type":"step-start"}`)
-		insertTestPart(t, db, ptxt, msgID, sid, ts+52,
-			fmt.Sprintf(`{"type":"text","text":"Session %s active"}`, sid))
-		insertTestPart(t, db, psf, msgID, sid, ts+200,
-			`{"reason":"stop","type":"step-finish","tokens":{"total":2},"cost":0.000001}`)
-	}
-
-	// Write pending markers pointing to dead panes so relay pairs without live panes.
-	for i := range []string{sessionA, sessionB} {
-		sname := fmt.Sprintf("dp-ambig-cand-%d", i)
-		target := sname + ":0.0"
-		pp := filepath.Join(stateDir, "pending-"+sname)
-		if err := os.WriteFile(pp, []byte(target), 0644); err != nil {
-			t.Fatal(err)
-		}
-		mt := time.UnixMilli(now - int64(5000) + int64(i*3000))
-		os.Chtimes(pp, mt, mt)
+	// Insert messages with provider info so the candidate list can include them.
+	for _, s := range []struct {
+		sid      string
+		msgID    string
+		provider string
+		ts       int64
+	}{
+		{sessionA, "msg_ambig_asst_A", "anthropic", now - 4000},
+		{sessionB, "msg_ambig_asst_B", "openai", now - 1000},
+	} {
+		insertTestMessageWithProvider(t, db, s.msgID, s.sid, "assistant", s.provider, s.ts)
 	}
 	db.Close()
 
-	// Start relay.
+	// Pre-populate sessions.json with both sessions.
+	// Both have dead tmux targets (no pane alive) but known thread IDs.
+	// This mimics sessions that were active but whose panes have since died.
+	threadA := "ch-ambig-threadA-001"
+	threadB := "ch-ambig-threadB-001"
+	channelID := "ch-ambig-001"
+
+	sessionsData := fmt.Sprintf(`[
+  {
+    "session_id": %q,
+    "tmux_target": "dp-dead-A:0.0",
+    "thread_id": %q,
+    "thread_root_id": "root-A-001",
+    "channel_id": %q,
+    "status": "active"
+  },
+  {
+    "session_id": %q,
+    "tmux_target": "dp-dead-B:0.0",
+    "thread_id": %q,
+    "thread_root_id": "root-B-001",
+    "channel_id": %q,
+    "status": "active"
+  }
+]`, sessionA, threadA, channelID, sessionB, threadB, channelID)
+
+	sessionsPath := filepath.Join(stateDir, "sessions.json")
+	if err := os.WriteFile(sessionsPath, []byte(sessionsData), 0644); err != nil {
+		t.Fatalf("write sessions.json: %v", err)
+	}
+
+	// Start relay. It loads sessions.json and pre-seeds both sessions into
+	// `seen`, so scanSessions won't try to re-pair them. The relay IS aware
+	// of both threads via w.sessions.All().
 	relayCmd := exec.Command(relayBin)
 	relayCmd.Env = append(os.Environ(),
 		"DISCORD_TOKEN=test-token",
-		"DISCORD_CHANNEL_ID=test-ambig-ch",
+		fmt.Sprintf("DISCORD_CHANNEL_ID=%s", channelID),
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
 		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
 		"DISCORD_USER_ID=user-ambig-001",
-		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", fakeDP),
 	)
 	relayCmd.Stdout = io.Discard
 	relayCmd.Stderr = os.Stderr
@@ -429,67 +482,51 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 		t.Fatalf("start relay: %v", err)
 	}
 	t.Cleanup(func() { relayCmd.Process.Kill() })
-	t.Cleanup(func() {
-		if out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output(); err == nil {
-			for _, sess := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-				if strings.HasPrefix(sess, "dp-") {
-					exec.Command("tmux", "kill-session", "-t", sess).Run()
-				}
-			}
-		}
-	})
 
-	// Wait for the first thread to be created.
-	var firstThreadID string
-	if err := waitForThreadCreation(t, mockPort, &firstThreadID, 60*time.Second); err != nil {
-		t.Fatalf("first thread not created: %v", err)
-	}
-	t.Logf("first thread created: id=%s", firstThreadID)
+	// Wait for the relay to connect to the Discord gateway (READY ack).
+	// We detect this by waiting for the relay to be running and accepting events:
+	// dispatch a harmless typing indicator probe to confirm the gateway is live.
+	time.Sleep(500 * time.Millisecond) // brief wait for relay to connect
 
-	// Wait for a second thread (or use the first if only one shows up).
-	targetThreadID := firstThreadID
-	waitDeadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(waitDeadline) {
-		msgs, _ := getSentMessages(mockPort)
-		count := 0
-		lastIdx := -1
-		for i, m := range msgs {
-			var body struct {
-				Type int `json:"type"`
-			}
-			if err := json.Unmarshal(m, &body); err == nil && body.Type == 11 {
-				count++
-				lastIdx = i
-			}
-		}
-		if count >= 2 {
-			targetThreadID = fmt.Sprintf("%d", lastIdx+1)
-			break
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	t.Logf("using thread %s for ambiguous !resume test", targetThreadID)
-
-	// Give relay time to settle.
-	time.Sleep(500 * time.Millisecond)
+	// Clear any stale messages.
 	clearSentMessages(mockPort)
 
-	// Dispatch `!resume` (bare, no number) to the thread.
-	// With two known sessions having dead panes, the relay should post a candidate list.
-	resumeEvent := buildMessageEvent("msg-ambig-001", targetThreadID, "user-ambig-001", false, "!resume", nil)
+	// Dispatch bare `!resume` to threadA.
+	// The relay finds rec for sessionA (via threadA), calls handleAmbiguousResume,
+	// queries DB → 2 sessions → posts numbered candidate list.
+	resumeEvent := buildMessageEvent("msg-ambig-resume", threadA, "user-ambig-001", false, "!resume", nil)
 	if err := dispatchEvent(mockPort, resumeEvent); err != nil {
 		t.Fatalf("dispatch !resume: %v", err)
 	}
 
-	// Wait for the relay to post a candidate list containing "1." (numbered entries).
-	if err := waitForMessageContent(t, mockPort, "1.", 30*time.Second); err != nil {
-		t.Fatalf("candidate list not posted (expected '1.' in response): %v", err)
+	// Wait for the candidate list (must contain "1." for the first entry).
+	if err := waitForMessageContent(t, mockPort, "1.", 15*time.Second); err != nil {
+		msgs, _ := getSentMessages(mockPort)
+		for _, m := range msgs {
+			t.Logf("  msg: %s", contentOf(m))
+		}
+		t.Fatalf("candidate list not posted: %v", err)
 	}
 	t.Log("✓ Invariant 4b: candidate list posted for ambiguous !resume")
 
+	// Verify the candidate list includes the provider field.
+	msgs, _ := getSentMessages(mockPort)
+	var candidateMsg string
+	for _, m := range msgs {
+		c := contentOf(m)
+		if strings.Contains(c, "1.") {
+			candidateMsg = c
+			break
+		}
+	}
+	if !strings.Contains(candidateMsg, "provider:") {
+		t.Errorf("candidate list missing 'provider:' field; got: %q", candidateMsg)
+	}
+	t.Logf("✓ candidate list contains provider field: %q", candidateMsg)
+
 	// Reply with `!resume 1` to select the first candidate.
 	clearSentMessages(mockPort)
-	choiceEvent := buildMessageEvent("msg-ambig-choice", targetThreadID, "user-ambig-001", false, "!resume 1", nil)
+	choiceEvent := buildMessageEvent("msg-ambig-choice", threadA, "user-ambig-001", false, "!resume 1", nil)
 	if err := dispatchEvent(mockPort, choiceEvent); err != nil {
 		t.Fatalf("dispatch !resume 1: %v", err)
 	}
@@ -502,16 +539,17 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 		t.Error("relay process exited unexpectedly after !resume 1")
 	}
 
-	msgs, _ := getSentMessages(mockPort)
+	msgs, _ = getSentMessages(mockPort)
 	t.Logf("✓ relay handled !resume 1 (%d response messages)", len(msgs))
 	for _, m := range msgs {
 		t.Logf("  msg: %s", contentOf(m))
 	}
 	t.Log("✓ Invariant 4b: ambiguous !resume handled without crash")
 
-	// Explicit teardown: kill relay and all dp-* sessions before test ends,
-	// then allow a brief settling time for the filesystem.
+	// Explicit teardown: kill relay and clean up any dpmux-spawned dp-* sessions.
 	relayCmd.Process.Kill()
+	time.Sleep(500 * time.Millisecond)
+	// Clean up any dp-* tmux sessions that may have been spawned by dpmux during the test.
 	if out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output(); err == nil {
 		for _, sess := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if strings.HasPrefix(sess, "dp-") {
@@ -519,5 +557,24 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 			}
 		}
 	}
-	time.Sleep(300 * time.Millisecond) // Let filesystem settle after abrupt kills.
+	time.Sleep(300 * time.Millisecond)
 }
+
+// ── DB helper with model/provider ───────────────────────────────────────────
+
+// insertTestMessageWithProvider inserts a message row with model.providerID set.
+// Used to verify that the candidate list includes provider info.
+func insertTestMessageWithProvider(t *testing.T, db *sql.DB, id, sessionID, role, providerID string, ts int64) {
+	t.Helper()
+	data := fmt.Sprintf(`{"role":%q,"time":{"created":%d},"model":{"providerID":%q,"modelID":"test-model"}}`,
+		role, ts, providerID)
+	_, err := db.Exec(
+		`INSERT INTO message(id,session_id,time_created,time_updated,data) VALUES(?,?,?,?,?)`,
+		id, sessionID, ts, ts, data,
+	)
+	if err != nil {
+		t.Fatalf("insertTestMessageWithProvider: %v", err)
+	}
+}
+
+
