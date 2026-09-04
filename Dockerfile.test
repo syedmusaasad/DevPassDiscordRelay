@@ -41,7 +41,8 @@ COPY --chown=testuser:testuser . .
 RUN mkdir -p /home/testuser/bin && \
     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code && \
     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord && \
-    CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay
+    CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay && \
+    CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
 
 ENV PATH="/home/testuser/bin:${PATH}"
 
