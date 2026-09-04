@@ -357,6 +357,192 @@ func TestMirror_ToolErrorSoftening(t *testing.T) {
 	t.Log("✓ tool error embed posted with ❌ failed")
 }
 
+// ── TestMirror_LongTextChunksToFollowups ──────────────────────────────────────
+//
+// A 5000-char assistant reply must be split into >=3 Discord messages whose
+// concatenation equals the original reply.
+func TestMirror_LongTextChunksToFollowups(t *testing.T) {
+	mustBin(t, "tmux")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+
+	xdgHome := t.TempDir()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+
+	mockPort := "19884"
+	mockGWPort := "19885"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTestSchema(db); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	// Build a 5000-char reply with paragraph breaks so ChunkText can split it.
+	// Use distinct content in each paragraph to avoid dedup issues.
+	// Each paragraph is ~1000 chars (200 words) followed by "\n\n".
+	makeParaWith := func(word string, n int) string {
+		s := ""
+		for i := 0; i < n; i++ {
+			s += word + " "
+		}
+		return s
+	}
+	para1 := makeParaWith("alpha", 200) // 1200 chars (6 chars each)
+	para2 := makeParaWith("bravo", 200)
+	para3 := makeParaWith("charlie", 200) // 1600 chars (8 chars each)
+	longReply := para1 + "\n\n" + para2 + "\n\n" + para3
+	// Ensure total is > 4000 chars so we get at least 3 chunks.
+	if len(longReply) < 4001 {
+		t.Fatalf("test setup: longReply too short (%d chars), expected >4000", len(longReply))
+	}
+
+	sessionID := "ses_longtext001"
+	now := time.Now().UnixMilli()
+	insertTestSession(t, db, sessionID, now)
+	msgAsstID := "msg_asst_longtext"
+	insertTestMessage(t, db, msgAsstID, sessionID, "assistant", now+100)
+	insertTestPart(t, db, "prt_ss_lt", msgAsstID, sessionID, now+101, `{"type":"step-start"}`)
+	// One big text part with the full 5000-char reply.
+	textData, _ := json.Marshal(map[string]string{"type": "text", "text": longReply})
+	insertTestPart(t, db, "prt_text_lt", msgAsstID, sessionID, now+200, string(textData))
+	insertTestPart(t, db, "prt_sf_lt", msgAsstID, sessionID, now+300,
+		`{"reason":"stop","type":"step-finish","tokens":{"total":100},"cost":0.001}`)
+	db.Close()
+
+	sessionName := "dp-test-longtext"
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	markerTime := time.UnixMilli(now - 500)
+	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(pendingPath, markerTime, markerTime)
+
+	startRelay(t, relayBin, dbPath, stateDir, mockPort)
+
+	// Wait for the session-ended marker (session fully mirrored).
+	if err := waitForMessageContent(t, mockPort, "⏹ Session ended", 20*time.Second); err != nil {
+		t.Fatalf("session end not seen: %v", err)
+	}
+
+	// Gather all sent messages.
+	msgs, err := getSentMessages(mockPort)
+	if err != nil {
+		t.Fatalf("get sent messages: %v", err)
+	}
+
+	// Find all distinct content values that are substrings of longReply.
+	// We collect them in order (mock sends are recorded in order of relay sends).
+	seen := make(map[string]bool)
+	var textChunks []string
+	for _, m := range msgs {
+		c := contentOf(m)
+		if c == "" || seen[c] {
+			continue
+		}
+		// Only collect if the content is a non-trivial substring of the long reply.
+		// Use the raw content (not TrimSpace'd) for the Contains check.
+		if len(c) > 50 && strings.Contains(longReply, c) {
+			seen[c] = true
+			textChunks = append(textChunks, c)
+		}
+	}
+
+	if len(textChunks) < 3 {
+		t.Errorf("expected >=3 text chunk messages in thread, got %d; chunks: %v",
+			len(textChunks), textChunks)
+	}
+
+	// Verify the chunks reassemble to the full reply.
+	concatenated := strings.Join(textChunks, "")
+	if concatenated != longReply {
+		t.Errorf("chunks do not reassemble to original reply:\noriginal len=%d\nconcatenated len=%d",
+			len(longReply), len(concatenated))
+	}
+	t.Logf("✓ long text split into %d chunks, concatenation matches (len=%d)", len(textChunks), len(longReply))
+}
+
+// ── TestMirror_ToolErrorSoftenedOnCleanEnd ────────────────────────────────────
+//
+// A tool error followed by a clean step-finish: the error embed must be softened
+// in-place (flipped to ⚠️ warning) and the embed footer reads "turn completed".
+func TestMirror_ToolErrorSoftenedOnCleanEnd(t *testing.T) {
+	mustBin(t, "tmux")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+
+	xdgHome := t.TempDir()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+
+	mockPort := "19886"
+	mockGWPort := "19887"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTestSchema(db); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+
+	sessionID := "ses_toolsoft001"
+	now := time.Now().UnixMilli()
+	insertTestSession(t, db, sessionID, now)
+	msgAsstID := "msg_asst_toolsoft"
+	insertTestMessage(t, db, msgAsstID, sessionID, "assistant", now+100)
+	insertTestPart(t, db, "prt_ss_ts", msgAsstID, sessionID, now+101, `{"type":"step-start"}`)
+	// Tool enters error state.
+	insertTestPart(t, db, "prt_tool_ts_err", msgAsstID, sessionID, now+200,
+		`{"type":"tool","tool":"bash","callID":"call_soft001","state":{"status":"error","error":"failed"}}`)
+	// Assistant produces text (clean turn).
+	insertTestPart(t, db, "prt_text_ts", msgAsstID, sessionID, now+300,
+		`{"type":"text","text":"Handled the error gracefully."}`)
+	// Clean step-finish.
+	insertTestPart(t, db, "prt_sf_ts", msgAsstID, sessionID, now+400,
+		`{"reason":"stop","type":"step-finish","tokens":{"total":20},"cost":0.0001}`)
+	db.Close()
+
+	sessionName := "dp-test-toolsoft"
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	markerTime := time.UnixMilli(now - 500)
+	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(pendingPath, markerTime, markerTime)
+
+	startRelay(t, relayBin, dbPath, stateDir, mockPort)
+
+	// The tool embed should first appear as ❌ failed.
+	if err := waitForMessageContent(t, mockPort, "❌ failed", 15*time.Second); err != nil {
+		t.Fatalf("tool error embed not found: %v", err)
+	}
+	t.Log("✓ tool error embed posted with ❌ failed")
+
+	// After step-finish, the tool embed should be softened to ⚠️ warning with "turn completed".
+	if err := waitForMessageContent(t, mockPort, "turn completed", 15*time.Second); err != nil {
+		t.Fatalf("softened tool embed not found (expected 'turn completed'): %v", err)
+	}
+	t.Log("✓ tool error softened to ⚠️ warning with 'turn completed' after clean step-finish")
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func startMockDiscord(t *testing.T, bin, port, gwPort string) *exec.Cmd {

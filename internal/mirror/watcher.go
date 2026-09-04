@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -269,14 +270,16 @@ func (w *Watcher) mirrorSession(ctx context.Context, sessionID, tmuxTarget strin
 
 // msgState tracks per-message relay state.
 type msgState struct {
-	role         string
-	discordMsgID string // for assistant text accumulation
-	text         string // accumulated text so far
-	toolCalls    map[string]*toolState
-	isPreamble   bool
-	finishSeen   bool
-	promptEchoed bool
-	hadOutput    bool
+	role          string
+	discordMsgID  string   // current edit-target Discord message ID for assistant text
+	discordMsgIDs []string // all Discord message IDs posted for this assistant text (for softening)
+	text          string   // accumulated text so far
+	chunkedBytes  int      // byte offset into text that has been committed to discordMsgIDs[:-1]
+	toolCalls     map[string]*toolState
+	isPreamble    bool
+	finishSeen    bool
+	promptEchoed  bool
+	hadOutput     bool
 }
 
 // toolState tracks per-tool-call state.
@@ -399,6 +402,16 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 					if !ms.hadOutput && lastAsstMsgID == part.MessageID {
 						w.sendToThread(threadID, "_Turn finished without output_")
 					}
+					// Soften any failed tool embeds in-place: flip ❌ failed → ⚠️ warning
+					for _, ts := range ms.toolCalls {
+						if ts.failed && ts.msgID != "" {
+							content := formatToolEmbedSoftened(ts.toolName, ts.callID)
+							w.throttle.Wait(threadID)
+							if err := w.discordEdit(threadID, ts.msgID, content); err != nil {
+								log.Printf("mirror: soften tool embed: %v", err)
+							}
+						}
+					}
 					// Summary line
 					toolCount := len(ms.toolCalls)
 					w.sendToThread(threadID, fmt.Sprintf("_— %d tool(s)_", toolCount))
@@ -430,37 +443,170 @@ func (w *Watcher) fetchMessageRole(ctx context.Context, messageID string) (role 
 // sendToThread sends a message to the thread.
 func (w *Watcher) sendToThread(threadID, content string) {
 	w.throttle.Wait(threadID)
-	if _, err := w.discord.SendMessage(threadID, content); err != nil {
+	if _, err := w.discordSend(threadID, content); err != nil {
 		log.Printf("mirror: sendToThread: %v", err)
 	}
 }
 
-// updateTextMessage creates or edits the current assistant text Discord message.
+// updateTextMessage creates or edits assistant text Discord messages.
+//
+// Invariant: ms.discordMsgIDs[i] is the Discord message ID for chunk i.
+// ms.discordMsgID is the current streaming target (the last ID in discordMsgIDs).
+//
+// Streaming behavior:
+//   - While text fits in one chunk, the same message is edited in place.
+//   - When text overflows 2000 chars, the current message is sealed (edited with
+//     the final split point) and a new follow-up message is created for the remainder.
+//   - This repeats for each additional overflow, so K chunks → K Discord messages.
 func (w *Watcher) updateTextMessage(threadID string, ms *msgState) {
-	text := truncateForDiscord(ms.text)
-	if ms.discordMsgID == "" {
+	chunks := ChunkText(ms.text, 2000)
+	if len(chunks) == 0 {
+		return
+	}
+
+	N := len(ms.discordMsgIDs) // Discord messages already created
+	K := len(chunks)            // chunks needed now
+
+	if N == 0 {
+		// First call: create the first Discord message.
 		w.throttle.Wait(threadID)
-		msg, err := w.discord.SendMessage(threadID, text)
+		msg, err := w.discordSend(threadID, chunks[0])
 		if err != nil {
-			log.Printf("mirror: create text message: %v", err)
+			log.Printf("mirror: create text chunk 0: %v", err)
 			return
 		}
+		ms.discordMsgIDs = append(ms.discordMsgIDs, msg.ID)
 		ms.discordMsgID = msg.ID
-	} else {
-		w.throttle.Wait(threadID)
-		if err := w.discord.EditMessage(threadID, ms.discordMsgID, text); err != nil {
-			log.Printf("mirror: edit text message: %v", err)
+		N = 1
+		// Fall through: if K > 1, we need to create more messages below.
+	}
+
+	if K > N {
+		// We've overflowed into more chunks. Seal all existing messages with their
+		// final chunk content, then create messages for any new chunks.
+
+		// Step 1: Seal all existing messages (they may have been written with partial text).
+		for i := 0; i < N; i++ {
+			w.throttle.Wait(threadID)
+			if err := w.discordEdit(threadID, ms.discordMsgIDs[i], chunks[i]); err != nil {
+				log.Printf("mirror: seal text chunk %d: %v", i, err)
+			}
 		}
+
+		// Step 2: Create messages for any remaining chunks.
+		for i := N; i < K; i++ {
+			w.throttle.Wait(threadID)
+			msg, err := w.discordSend(threadID, chunks[i])
+			if err != nil {
+				log.Printf("mirror: create text chunk %d: %v", i, err)
+				return
+			}
+			ms.discordMsgIDs = append(ms.discordMsgIDs, msg.ID)
+			ms.discordMsgID = msg.ID
+		}
+	} else {
+		// Same number of chunks as before (K == N, since text only grows).
+		// Just edit the live (last) message with the latest content.
+		lastIdx := K - 1
+		w.throttle.Wait(threadID)
+		if err := w.discordEdit(threadID, ms.discordMsgIDs[lastIdx], chunks[lastIdx]); err != nil {
+			log.Printf("mirror: edit text chunk %d: %v", lastIdx, err)
+		}
+		ms.discordMsgID = ms.discordMsgIDs[lastIdx]
 	}
 }
 
-// truncateForDiscord returns text truncated to 2000 chars for Discord.
-func truncateForDiscord(text string) string {
-	chunks := ChunkText(text, 2000)
-	if len(chunks) == 0 {
-		return text
+// discordSend sends a message with 429 retry logic.
+func (w *Watcher) discordSend(channelID, content string) (MsgRef, error) {
+	msg, err := w.discord.SendMessage(channelID, content)
+	if err == nil {
+		return msg, nil
 	}
-	return chunks[0]
+	if retryAfter, ok := extractRetryAfter(err); ok {
+		log.Printf("mirror: 429 rate-limit on send, retry after %v", retryAfter)
+		w.throttle.SetBackoff(channelID, retryAfter)
+		time.Sleep(retryAfter)
+		w.throttle.ClearBackoff(channelID)
+		return w.discord.SendMessage(channelID, content)
+	}
+	return MsgRef{}, err
+}
+
+// discordEdit edits a message with 429 retry logic.
+func (w *Watcher) discordEdit(channelID, messageID, content string) error {
+	err := w.discord.EditMessage(channelID, messageID, content)
+	if err == nil {
+		return nil
+	}
+	if retryAfter, ok := extractRetryAfter(err); ok {
+		log.Printf("mirror: 429 rate-limit on edit, retry after %v", retryAfter)
+		w.throttle.SetBackoff(channelID, retryAfter)
+		time.Sleep(retryAfter)
+		w.throttle.ClearBackoff(channelID)
+		return w.discord.EditMessage(channelID, messageID, content)
+	}
+	return err
+}
+
+// rateLimitErr is the interface satisfied by discordgo.RateLimitError.
+type rateLimitErr interface {
+	error
+	// RetryAfter is embedded via *RateLimit → *TooManyRequests.
+}
+
+// ExtractRetryAfter extracts the retry_after duration from a discordgo rate-limit error.
+// It checks for the discordgo RateLimitError interface (has RetryAfter field via
+// reflection-unsafe casting) or parses the error string as a fallback.
+// Exported for use in unit tests.
+func ExtractRetryAfter(err error) (time.Duration, bool) {
+	return extractRetryAfter(err)
+}
+
+// extractRetryAfter extracts the retry_after duration from a discordgo rate-limit error.
+// It checks for the discordgo RateLimitError interface (has RetryAfter field via
+// reflection-unsafe casting) or parses the error string as a fallback.
+func extractRetryAfter(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	// discordgo.RateLimitError embeds *RateLimit which embeds *TooManyRequests.
+	// We can't import discordgo here, so use an interface with a method.
+	type retryAfterGetter interface {
+		GetRetryAfter() time.Duration
+	}
+	// Try the interface directly.
+	var rg retryAfterGetter
+	if errors.As(err, &rg) {
+		return rg.GetRetryAfter(), true
+	}
+
+	// Try unwrapping to find a *retryAfterHolder (our own wrapper, used in tests).
+	type retryHolder interface {
+		RetryAfterDuration() time.Duration
+	}
+	var rh retryHolder
+	if errors.As(err, &rh) {
+		return rh.RetryAfterDuration(), true
+	}
+
+	// Fallback: parse the error string for "retry after <duration>".
+	msg := err.Error()
+	const prefix = "retry after "
+	if idx := strings.Index(msg, prefix); idx >= 0 {
+		rest := msg[idx+len(prefix):]
+		// Trim at first space or end.
+		end := len(rest)
+		for i, c := range rest {
+			if c == ' ' || c == ',' {
+				end = i
+				break
+			}
+		}
+		if d, parseErr := time.ParseDuration(rest[:end]); parseErr == nil {
+			return d, true
+		}
+	}
+	return 0, false
 }
 
 // handleToolPart updates the tool embed for a tool-call part.
@@ -475,7 +621,7 @@ func (w *Watcher) handleToolPart(threadID string, cp ClassifiedPart, ms *msgStat
 		// Post tool embed
 		content := formatToolEmbed(cp.ToolName, cp.ToolID, false, false)
 		w.throttle.Wait(threadID)
-		toolMsg, sendErr := w.discord.SendMessage(threadID, content)
+		toolMsg, sendErr := w.discordSend(threadID, content)
 		if sendErr != nil {
 			log.Printf("mirror: tool embed: %v", sendErr)
 			return
@@ -503,14 +649,14 @@ func (w *Watcher) handleToolPart(threadID string, cp ClassifiedPart, ms *msgStat
 		ts.done = true
 		content := formatToolEmbed(ts.toolName, ts.callID, true, false)
 		w.throttle.Wait(threadID)
-		if err := w.discord.EditMessage(threadID, ts.msgID, content); err != nil {
+		if err := w.discordEdit(threadID, ts.msgID, content); err != nil {
 			log.Printf("mirror: update tool embed done: %v", err)
 		}
 	} else if status == "error" && !ts.failed {
 		ts.failed = true
 		content := formatToolEmbed(ts.toolName, ts.callID, false, true)
 		w.throttle.Wait(threadID)
-		if err := w.discord.EditMessage(threadID, ts.msgID, content); err != nil {
+		if err := w.discordEdit(threadID, ts.msgID, content); err != nil {
 			log.Printf("mirror: update tool embed error: %v", err)
 		}
 	}
@@ -528,10 +674,17 @@ func formatToolEmbed(toolName, callID string, done, failed bool) string {
 	return fmt.Sprintf("🔧 **Tool:** `%s` | %s | ID: `%s`", toolName, status, callID)
 }
 
+// formatToolEmbedSoftened formats a previously-failed tool embed as a warning
+// (used when step-finish arrives clean, softening the error in-place).
+func formatToolEmbedSoftened(toolName, callID string) string {
+	return fmt.Sprintf("🔧 **Tool:** `%s` | ⚠️ warning | ID: `%s` | turn completed", toolName, callID)
+}
+
 // isTmuxPaneAlive checks if a tmux pane target is still alive.
+// Uses list-panes -t <target> (window-level check) rather than has-session,
+// so a dead pane inside a live session is correctly detected.
 func isTmuxPaneAlive(target string) bool {
-	// Use has-session for session-level check; for window/pane use list-panes
-	err := exec.Command("tmux", "has-session", "-t", target).Run()
+	err := exec.Command("tmux", "list-panes", "-t", target).Run()
 	return err == nil
 }
 

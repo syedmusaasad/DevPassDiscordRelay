@@ -10,9 +10,10 @@
 // Writes ~/.devpass-discord-relay/pending-<session-name> containing the tmux target.
 //
 // Inside-pane detection:
-//   - If we are already inside a pane on the default per-uid socket → new-window in
+//   - If we are already inside a pane on the DEFAULT per-uid socket
+//     (/tmp/tmux-<uid>/default or $TMUX_TMPDIR/default) → new-window in
 //     the host session, target <host-session>:=<window-name>
-//   - Otherwise → fresh default-socket session.
+//   - Any other socket (or no TMUX) → fresh session on the default socket.
 //
 // Env overrides:
 //
@@ -26,7 +27,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -47,19 +47,41 @@ func run(args []string) error {
 	return runLaunch(args)
 }
 
-// runLS lists active relay sessions (suppresses window lines duplicating session name).
+// runLS lists active relay (dp-*) sessions and their windows.
+// Window lines that duplicate their session name are suppressed.
 func runLS() error {
-	out, err := exec.Command("tmux", "list-sessions").Output()
+	// List all sessions, filter to dp-* only.
+	sessOut, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
-		// No sessions running is OK
+		// No sessions running is OK.
 		return nil
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
+	var dpSessions []string
+	for _, line := range strings.Split(strings.TrimSpace(string(sessOut)), "\n") {
 		if line == "" {
 			continue
 		}
-		fmt.Println(line)
+		if strings.HasPrefix(line, "dp-") {
+			dpSessions = append(dpSessions, line)
+		}
+	}
+	if len(dpSessions) == 0 {
+		return nil
+	}
+
+	for _, sess := range dpSessions {
+		fmt.Println(sess)
+		// List windows for this session; suppress windows whose name equals the session name.
+		winOut, err := exec.Command("tmux", "list-windows", "-t", sess, "-F", "#{window_name}").Output()
+		if err != nil {
+			continue
+		}
+		for _, wline := range strings.Split(strings.TrimSpace(string(winOut)), "\n") {
+			if wline == "" || wline == sess {
+				continue
+			}
+			fmt.Println("  " + wline)
+		}
 	}
 	return nil
 }
@@ -99,20 +121,21 @@ func runLaunch(args []string) error {
 		dpArgs = append([]string{"--auto"}, dpArgs...)
 	}
 
-	// Detect if we're inside a tmux pane on the default socket
-	hostSession := os.Getenv("TMUX")
-	isInsideTmux := hostSession != ""
+	// Detect if we're inside a tmux pane on the DEFAULT per-uid socket.
+	// The TMUX env var format is: <socket-path>,<server-pid>,<window-index>
+	// Only use new-window when the socket path is the default per-uid socket
+	// (/tmp/tmux-<uid>/default or $TMUX_TMPDIR/default).
+	isInsideDefaultSocket := isOnDefaultTmuxSocket()
 
 	var tmuxTarget string
 	var launchErr error
 
-	if isInsideTmux {
-		// We're inside tmux; create a new window in the host session
-		// TMUX env var format: /tmp/tmux-UID/default,<PID>,<window-index>
+	if isInsideDefaultSocket {
+		// We're inside tmux on the default socket; create a new window in the host session.
 		hostSessionName := extractHostSessionName()
 		if hostSessionName == "" {
 			// fallback: use a new session
-			isInsideTmux = false
+			isInsideDefaultSocket = false
 		} else {
 			windowName := sessionName
 			tmuxTarget = hostSessionName + ":=" + windowName
@@ -122,21 +145,27 @@ func runLaunch(args []string) error {
 		}
 	}
 
-	if !isInsideTmux || launchErr != nil {
+	if !isInsideDefaultSocket || launchErr != nil {
 		// Fresh session on default socket
 		tmuxTarget = sessionName + ":0.0"
+	}
+
+	// Write pending marker BEFORE spawning so the relay can pair even if the
+	// process starts immediately. This is the contract from the spec.
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	if err := os.WriteFile(pendingPath, []byte(tmuxTarget), 0644); err != nil {
+		return fmt.Errorf("write pending marker: %w", err)
+	}
+
+	if !isInsideDefaultSocket || launchErr != nil {
 		launchCmd := buildDevpassCmd(devpassBin, dpArgs)
 		launchErr = exec.Command("tmux", "new-session", "-d", "-s", sessionName,
 			"-x", "220", "-y", "50", launchCmd).Run()
 		if launchErr != nil {
+			// Clean up pending marker on failure.
+			os.Remove(pendingPath)
 			return fmt.Errorf("tmux new-session: %w", launchErr)
 		}
-	}
-
-	// Write pending marker BEFORE the process is up so the relay can pair
-	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
-	if err := os.WriteFile(pendingPath, []byte(tmuxTarget), 0644); err != nil {
-		return fmt.Errorf("write pending marker: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
@@ -157,6 +186,34 @@ func buildDevpassCmd(devpassBin string, args []string) string {
 // shellQuote wraps a string in single quotes for shell safety.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+// isOnDefaultTmuxSocket returns true if the current process is running inside
+// a tmux pane on the default per-uid socket.
+// The default socket path is /tmp/tmux-<uid>/default (or $TMUX_TMPDIR/default).
+// TMUX env var format: <socket-path>,<server-pid>,<window-index>
+func isOnDefaultTmuxSocket() bool {
+	tmuxEnv := os.Getenv("TMUX")
+	if tmuxEnv == "" {
+		return false
+	}
+	// Extract the socket path (first comma-separated field).
+	socketPath := tmuxEnv
+	if idx := strings.Index(tmuxEnv, ","); idx >= 0 {
+		socketPath = tmuxEnv[:idx]
+	}
+	// Determine the expected default socket path.
+	defaultSocket := defaultTmuxSocket()
+	return socketPath == defaultSocket
+}
+
+// defaultTmuxSocket returns the path to the default per-uid tmux socket.
+func defaultTmuxSocket() string {
+	// $TMUX_TMPDIR/default, or /tmp/tmux-<uid>/default
+	if dir := os.Getenv("TMUX_TMPDIR"); dir != "" {
+		return filepath.Join(dir, "default")
+	}
+	return fmt.Sprintf("/tmp/tmux-%d/default", os.Getuid())
 }
 
 // extractHostSessionName gets the session name from the TMUX env var.
@@ -200,9 +257,4 @@ func resolveStateDir() (string, error) {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
 	return filepath.Join(home, ".devpass-discord-relay"), nil
-}
-
-func init() {
-	// Use strconv to avoid unused import errors during compilation
-	_ = strconv.Itoa
 }
