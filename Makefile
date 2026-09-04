@@ -14,13 +14,17 @@ T ?=
 
 all: build
 
-## build: compile static relay binary to bin/relay and bin/dpmux
+## build: compile static binaries to bin/
 build:
 	@mkdir -p bin
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) \
 	  go build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/relay
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) \
 	  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) \
+	  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) \
+	  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
 
 ## unit: run all unit tests (no integration tag)
 unit:

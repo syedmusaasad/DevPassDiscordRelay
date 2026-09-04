@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,19 +27,33 @@ func (e *rateLimitTestError) RetryAfterDuration() time.Duration {
 }
 
 // mock429DiscordClient is a DiscordClient where SendMessage returns a typed
-// *rateLimitTestError on the first call and succeeds on subsequent calls.
+// *discordgo.RateLimitError on the first call and succeeds on subsequent calls.
+// This exercises the real typed 429 path in extractRetryAfter and discordSend.
 type mock429DiscordClient struct {
 	calls   int
 	sent    []string
 	retryMS int64 // retry_after in milliseconds
 }
 
+// makeRateLimitError constructs a real *discordgo.RateLimitError with the given
+// retry duration and URL, matching exactly the type returned by discordgo on a
+// live 429 response.
+func makeRateLimitError(d time.Duration, url string) *discordgo.RateLimitError {
+	return &discordgo.RateLimitError{
+		RateLimit: &discordgo.RateLimit{
+			TooManyRequests: &discordgo.TooManyRequests{RetryAfter: d},
+			URL:             url,
+		},
+	}
+}
+
 func (m *mock429DiscordClient) SendMessage(channelID, content string) (MsgRef, error) {
 	m.calls++
 	if m.calls == 1 {
-		// Return a typed 429 error so extractRetryAfter exercises the typed path.
+		// Return a real *discordgo.RateLimitError so extractRetryAfter exercises
+		// the primary typed path (not the test-double interface fallback).
 		d := time.Duration(m.retryMS) * time.Millisecond
-		return MsgRef{}, &rateLimitTestError{retryAfter: d, channel: channelID}
+		return MsgRef{}, makeRateLimitError(d, "/api/v10/channels/"+channelID+"/messages")
 	}
 	m.sent = append(m.sent, content)
 	return MsgRef{ID: fmt.Sprintf("msg-%d", m.calls), ChannelID: channelID}, nil
@@ -48,7 +63,7 @@ func (m *mock429DiscordClient) EditMessage(channelID, messageID, content string)
 	m.calls++
 	if m.calls == 1 {
 		d := time.Duration(m.retryMS) * time.Millisecond
-		return &rateLimitTestError{retryAfter: d, channel: channelID}
+		return makeRateLimitError(d, "/api/v10/channels/"+channelID+"/messages/"+messageID)
 	}
 	return nil
 }
@@ -63,9 +78,9 @@ func (m *mock429DiscordClient) RenameThread(threadID, name string) error { retur
 
 func (m *mock429DiscordClient) OnMessage(fn MessageHandler) {}
 
-// TestThrottle_429Backoff verifies that when a Discord send returns a typed 429
-// *rateLimitTestError, the watcher:
-//  1. Extracts the retry_after duration via the typed interface.
+// TestThrottle_429Backoff verifies that when a Discord send returns a typed
+// *discordgo.RateLimitError (RetryAfter), the watcher:
+//  1. Extracts the retry_after duration via the *discordgo.RateLimitError primary path.
 //  2. Feeds it into the Throttle via SetBackoff.
 //  3. Sleeps for at least retry_after.
 //  4. Retries the send once and succeeds.
@@ -267,4 +282,156 @@ func TestDetectRefusal_ForeignIDNoPaneText(t *testing.T) {
 	} else {
 		t.Logf("✓ detectRefusal correctly identified foreign id as refusal (no pane text needed)")
 	}
+}
+
+// ── Pane-PID session binding tests ───────────────────────────────────────────
+
+// TestBindSessionByPanePid_NoPaneNoMatch verifies that when the pane-pid lookup
+// fails (dead pane), bindSessionByPanePid returns ("", false).
+func TestBindSessionByPanePid_NoPaneNoMatch(t *testing.T) {
+	db := testDB(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// panePidFn always fails — simulates a dead pane.
+	fakePanePid := func(target string) (int, error) {
+		return 0, fmt.Errorf("no server running")
+	}
+	fakeProcExists := func(pid int) bool { return true }
+
+	sid, ok := BindSessionByPanePid(
+		ctx, db, "dead-session:0.0", time.Now().UnixMilli(),
+		500*time.Millisecond, fakePanePid, fakeProcExists,
+	)
+	if ok || sid != "" {
+		t.Errorf("expected no binding for dead pane, got sid=%q ok=%v", sid, ok)
+	}
+	t.Log("✓ dead pane → no binding")
+}
+
+// TestBindSessionByPanePid_StaleRowLoses verifies that a session row created
+// BEFORE spawnInstant is never accepted, even when pane_pid is valid.
+// This is the "stale-row (created after relay start, before spawn, id sorts first)"
+// case required by the brief.
+func TestBindSessionByPanePid_StaleRowLoses(t *testing.T) {
+	db := testDB(t)
+
+	// Insert a stale session row (created 1 second BEFORE spawnInstant).
+	spawnInstant := time.Now().UnixMilli()
+	staleTime := spawnInstant - 1000
+
+	_, err := db.Exec(
+		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"ses_stale_001", "proj-test", "slug-stale", "/tmp", "stale session", "1.0", staleTime, staleTime,
+	)
+	if err != nil {
+		t.Fatalf("insert stale session: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Pane is "alive" — pid lookup succeeds.
+	fakePid := 99999
+	fakePanePid := func(target string) (int, error) { return fakePid, nil }
+	fakeProcExists := func(pid int) bool { return pid == fakePid }
+
+	// spawnInstant is NOW, so the stale row (1 s before) must not be returned.
+	sid, ok := BindSessionByPanePid(
+		ctx, db, "live-session:0.0", spawnInstant,
+		500*time.Millisecond, fakePanePid, fakeProcExists,
+	)
+	if ok || sid != "" {
+		t.Errorf("expected stale row to lose, got sid=%q ok=%v", sid, ok)
+	}
+	t.Log("✓ stale row (before spawnInstant) loses even with valid pane pid")
+}
+
+// TestBindSessionByPanePid_FreshRowWins verifies that a session row created AT
+// spawnInstant is accepted when the pane_pid is valid and /proc confirms liveness.
+// No nonce is used — binding relies entirely on pane-pid + row time.
+func TestBindSessionByPanePid_FreshRowWins(t *testing.T) {
+	db := testDB(t)
+
+	spawnInstant := time.Now().UnixMilli()
+	freshTime := spawnInstant // created at exactly spawnInstant
+
+	_, err := db.Exec(
+		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"ses_fresh_001", "proj-test", "slug-fresh", "/tmp", "fresh session", "1.0", freshTime, freshTime,
+	)
+	if err != nil {
+		t.Fatalf("insert fresh session: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fakePid := 99998
+	fakePanePid := func(target string) (int, error) { return fakePid, nil }
+	fakeProcExists := func(pid int) bool { return pid == fakePid }
+
+	sid, ok := BindSessionByPanePid(
+		ctx, db, "live-session:0.0", spawnInstant,
+		2*time.Second, fakePanePid, fakeProcExists,
+	)
+	if !ok || sid != "ses_fresh_001" {
+		t.Errorf("expected ses_fresh_001 to be bound, got sid=%q ok=%v", sid, ok)
+	}
+	t.Logf("✓ fresh row (time_created >= spawnInstant) wins with valid pane pid: bound=%s", sid)
+}
+
+// TestBindSessionByPanePid_StaleBeforeFreshWins verifies the key anti-ambiguity
+// guarantee: when a stale row (id sorts first lexicographically) exists alongside
+// a fresh row, only the fresh row is returned. The stale row must never win.
+func TestBindSessionByPanePid_StaleBeforeFreshWins(t *testing.T) {
+	db := testDB(t)
+
+	spawnInstant := time.Now().UnixMilli()
+	staleTime := spawnInstant - 2000
+	freshTime := spawnInstant
+
+	// Stale row: id "aaa_" sorts before "ses_" lexicographically.
+	_, err := db.Exec(
+		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"aaa_stale_sorts_first", "proj-test", "slug-s", "/tmp", "stale", "1.0", staleTime, staleTime,
+	)
+	if err != nil {
+		t.Fatalf("insert stale: %v", err)
+	}
+
+	_, err = db.Exec(
+		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		"ses_fresh_002", "proj-test", "slug-f", "/tmp", "fresh", "1.0", freshTime, freshTime,
+	)
+	if err != nil {
+		t.Fatalf("insert fresh: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	fakePid := 99997
+	fakePanePid := func(target string) (int, error) { return fakePid, nil }
+	fakeProcExists := func(pid int) bool { return pid == fakePid }
+
+	sid, ok := BindSessionByPanePid(
+		ctx, db, "live-session:0.0", spawnInstant,
+		2*time.Second, fakePanePid, fakeProcExists,
+	)
+	if !ok {
+		t.Fatal("expected a binding, got none")
+	}
+	if sid == "aaa_stale_sorts_first" {
+		t.Errorf("stale row (sorts first) must not win; got sid=%q", sid)
+	}
+	if sid != "ses_fresh_002" {
+		t.Errorf("expected ses_fresh_002, got %q", sid)
+	}
+	t.Logf("✓ stale-before-fresh: stale row loses, fresh row wins: bound=%s", sid)
 }

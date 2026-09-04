@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1381,6 +1382,95 @@ func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
 	return true
 }
 
+// ─── Pane-PID session binding ────────────────────────────────────────────────
+
+// panePidFromTmux returns the PID of the foreground process in the tmux pane
+// identified by target, using "tmux display-message -p -t <target> #{pane_pid}".
+// Returns 0 and an error if the query fails.
+func panePidFromTmux(target string) (int, error) {
+	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{pane_pid}").Output()
+	if err != nil {
+		return 0, fmt.Errorf("tmux display-message pane_pid: %w", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("invalid pane_pid %q", strings.TrimSpace(string(out)))
+	}
+	return pid, nil
+}
+
+// procExists returns true if /proc/<pid> exists, meaning the process was alive
+// when the check ran (or its pid slot is still in /proc after exit).
+func procExists(pid int) bool {
+	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
+	return err == nil
+}
+
+// BindSessionByPanePid is the exported, injectable form of bindSessionByPanePid.
+// It is used in unit tests to supply fake pane-pid and proc-exists functions.
+//
+// panePidFn: returns the PID of the tmux pane's foreground process.
+// procExistsFn: returns true if /proc/<pid> exists (process is alive).
+//
+// It polls db for the first session row with parent_id IS NULL and
+// time_created >= spawnInstant within timeout. If panePidFn succeeds and
+// procExistsFn confirms the process is alive, it returns the session id.
+//
+// Stale rows created before spawnInstant are never accepted.
+func BindSessionByPanePid(
+	ctx context.Context,
+	db *sql.DB,
+	tmuxTarget string,
+	spawnInstant int64,
+	timeout time.Duration,
+	panePidFn func(target string) (int, error),
+	procExistsFn func(pid int) bool,
+) (string, bool) {
+	return bindSessionByPanePid(ctx, db, tmuxTarget, spawnInstant, timeout, panePidFn, procExistsFn)
+}
+
+// bindSessionByPanePid implements the pane-pid ownership check.
+// It verifies the pane is alive (via panePidFn + procExistsFn) and then
+// accepts the first session row with time_created >= spawnInstant.
+func bindSessionByPanePid(
+	ctx context.Context,
+	db *sql.DB,
+	tmuxTarget string,
+	spawnInstant int64,
+	timeout time.Duration,
+	panePidFn func(target string) (int, error),
+	procExistsFn func(pid int) bool,
+) (string, bool) {
+	// Verify the pane is alive: get pane_pid and check /proc.
+	pid, pidErr := panePidFn(tmuxTarget)
+	if pidErr != nil || pid <= 0 {
+		return "", false
+	}
+	if !procExistsFn(pid) {
+		return "", false
+	}
+
+	// Poll for the first session row with time_created >= spawnInstant.
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return "", false
+		default:
+		}
+		var sid string
+		err := db.QueryRowContext(ctx,
+			`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? ORDER BY time_created ASC LIMIT 1`,
+			spawnInstant,
+		).Scan(&sid)
+		if err == nil && sid != "" {
+			return sid, true
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return "", false
+}
+
 // handleSpawnFromDiscord spawns a new dpmux session in response to a Discord
 // channel message (outside any thread), waits for the new session row to appear
 // in the DB, binds the session (via mirrorSession), and injects the Discord
@@ -1388,10 +1478,12 @@ func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
 //
 // Binding contract:
 //   - spawnStart is recorded BEFORE dpmux is invoked.
-//   - dpmux writes a JSON pending marker containing a nonce and the spawn instant.
-//   - The nonce is passed to devpass-code via RELAY_SPAWN_NONCE; devpass-code
-//     embeds it in the session title as "nonce:<hex>".
-//   - Only session rows with title "nonce:<hex>" matching the marker are accepted.
+//   - dpmux writes a JSON pending marker containing the spawn instant and tmux target.
+//   - Fast path (nonce): if the marker has a nonce and devpass-code embedded it in
+//     the session title as "nonce:<hex>", the row is matched by title.
+//   - Real path (pane-pid): if no nonce or title match times out, binding falls back
+//     to pane-pid ownership: tmux display-p #{pane_pid} + /proc verification +
+//     time_created >= spawnInstant. This works with the real devpass-code CLI.
 //   - Rows created before the marker's spawnInstant are never accepted.
 //   - Lexicographic ordering of session IDs is never used.
 //
@@ -1449,57 +1541,71 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 		return fmt.Errorf("read pending marker for %q: %w", sessionName, readErr)
 	}
 	var marker spawnMarkerJSON
-	if err := json.Unmarshal(markerData, &marker); err != nil {
-		return fmt.Errorf("parse pending marker for %q: %w", sessionName, err)
+	if jsonErr := json.Unmarshal(markerData, &marker); jsonErr != nil {
+		// Legacy plain-text marker: treat content as tmux target.
+		marker.Target = strings.TrimSpace(string(markerData))
 	}
-	if marker.Nonce == "" {
-		return fmt.Errorf("pending marker for %q has empty nonce", sessionName)
+	if marker.Target == "" {
+		marker.Target = sessionName + ":0.0"
 	}
 	spawnInstant := marker.SpawnInstant
 	if spawnInstant < spawnStartMS {
 		spawnInstant = spawnStartMS
 	}
 
-	// The nonce is embedded in the session title by devpass-code as "nonce:<hex>".
-	// Poll the DB for the session row whose title contains the nonce.
-	// Never accept rows created before the spawn instant.
-	nonceTitle := "nonce:" + marker.Nonce
 	bindTimeout := w.cfg.SpawnBindTimeout
-	deadline := time.Now().Add(bindTimeout)
+	tmuxTarget := marker.Target
 
 	var boundSessionID string
-	tmuxTarget := marker.Target
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 
-		var sid string
-		queryErr := w.db.QueryRowContext(ctx,
-			`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? AND title = ? LIMIT 1`,
-			spawnInstant, nonceTitle,
-		).Scan(&sid)
-		if queryErr == nil && sid != "" {
-			// Verify the pending marker still exists (it may have been consumed by
-			// scanSessions already; if so, check sessions.json).
-			if _, statErr := os.Stat(pendingPath); statErr == nil {
+	// Fast path: if marker has a nonce, poll for the matching session title.
+	// Real devpass-code may not persist RELAY_SPAWN_NONCE in the title, so this
+	// path may produce no match — in that case we fall through to pane-pid binding.
+	if marker.Nonce != "" {
+		nonceTitle := "nonce:" + marker.Nonce
+		deadline := time.Now().Add(bindTimeout / 2) // use half the budget for the fast path
+		for time.Now().Before(deadline) {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+			var sid string
+			queryErr := w.db.QueryRowContext(ctx,
+				`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? AND title = ? LIMIT 1`,
+				spawnInstant, nonceTitle,
+			).Scan(&sid)
+			if queryErr == nil && sid != "" {
+				// Verify the pending marker still exists (it may have been consumed by
+				// scanSessions already; if so, check sessions.json).
+				if _, statErr := os.Stat(pendingPath); statErr == nil {
+					boundSessionID = sid
+					break
+				}
+				// Marker already consumed by scanSessions.
+				if existing := w.sessions.Get(sid); existing != nil {
+					boundSessionID = sid
+					tmuxTarget = existing.TmuxTarget
+					break
+				}
+				// Marker consumed but session not yet in sessions.json.
 				boundSessionID = sid
 				break
 			}
-			// Marker already consumed by scanSessions.
-			if existing := w.sessions.Get(sid); existing != nil {
-				boundSessionID = sid
-				tmuxTarget = existing.TmuxTarget
-				break
-			}
-			// Marker consumed but session not yet in sessions.json; it's being processed.
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	// Real path (pane-pid): if nonce binding did not find a row, prove ownership
+	// via the pane's PID and /proc. This works with the real devpass-code CLI which
+	// does not persist RELAY_SPAWN_NONCE in the session title.
+	if boundSessionID == "" {
+		if sid, ok := bindSessionByPanePid(
+			ctx, w.db, tmuxTarget, spawnInstant, bindTimeout,
+			panePidFromTmux, procExists,
+		); ok {
 			boundSessionID = sid
-			break
 		}
-
-		time.Sleep(300 * time.Millisecond)
 	}
 
 	if boundSessionID == "" {
