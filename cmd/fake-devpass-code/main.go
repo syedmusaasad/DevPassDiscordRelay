@@ -121,9 +121,10 @@ func run(args []string) error {
 	// With --auto and no explicit --session, resume the most recently created session
 	// if one exists in the DB (simulates dpmux-spawned devpass-code resuming a tracked
 	// session). Fall back to creating a new session only when the DB is empty.
+	// FAKE_DP_FORCE_NEW_SESSION=1 skips the auto-resume and always creates a new session.
 	activeSessionID := sessionID
 	if activeSessionID == "" {
-		if autoFlag {
+		if autoFlag && os.Getenv("FAKE_DP_FORCE_NEW_SESSION") != "1" {
 			var existing string
 			row := db.QueryRow(`SELECT id FROM session ORDER BY time_created DESC LIMIT 1`)
 			if err := row.Scan(&existing); err == nil && existing != "" {
@@ -237,6 +238,10 @@ func run(args []string) error {
 }
 
 func resolveDBPath() (string, error) {
+	// Honour RELAY_DEVPASS_DB if set (used when launched by dpmux in a relay test).
+	if v := os.Getenv("RELAY_DEVPASS_DB"); v != "" {
+		return v, nil
+	}
 	xdg := os.Getenv("XDG_DATA_HOME")
 	if xdg == "" {
 		home, err := os.UserHomeDir()

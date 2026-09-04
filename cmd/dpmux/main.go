@@ -174,8 +174,33 @@ func runLaunch(args []string) error {
 }
 
 // buildDevpassCmd constructs the shell command string for tmux.
+// It optionally prepends an "env VAR=VAL ..." prefix to forward environment
+// variables that the devpass-code process needs but may not inherit via the
+// tmux server's stored environment.  Currently forwards:
+//   - RELAY_DEVPASS_DB  → passed verbatim so fake-devpass-code can find the DB
+//   - FAKE_DP_*         → test fault-injection knobs
 func buildDevpassCmd(devpassBin string, args []string) string {
-	parts := make([]string, 0, len(args)+1)
+	// Collect env vars to forward explicitly.
+	var envPairs []string
+	for _, key := range []string{
+		"RELAY_DEVPASS_DB",
+		"FAKE_DP_FORCE_NEW_SESSION",
+		"FAKE_DP_READY_DELAY_MS",
+		"FAKE_DP_TRANSCRIPT_DELAY_MS",
+		"FAKE_DP_SWALLOW_UNTIL_READY",
+		"FAKE_DP_REFUSE_FIRST_RESUME",
+		"FAKE_DP_SCRIPT",
+	} {
+		if v := os.Getenv(key); v != "" {
+			envPairs = append(envPairs, key+"="+shellQuote(v))
+		}
+	}
+
+	parts := make([]string, 0, len(args)+1+len(envPairs)+1)
+	if len(envPairs) > 0 {
+		parts = append(parts, "env")
+		parts = append(parts, envPairs...)
+	}
 	parts = append(parts, shellQuote(devpassBin))
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))

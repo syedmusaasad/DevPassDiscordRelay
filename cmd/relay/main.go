@@ -91,6 +91,7 @@ func runRelay(ctx context.Context) error {
 		AllowedUserID: os.Getenv("DISCORD_USER_ID"),
 		DBPath:        dbPath,
 		StateDir:      stateDir,
+		DpmuxBin:      os.Getenv("RELAY_DPMUX_BIN"), // optional override for dpmux binary path
 	}
 
 	w, err := mirror.NewWatcher(cfg, db, dc)

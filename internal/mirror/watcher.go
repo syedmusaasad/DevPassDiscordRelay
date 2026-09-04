@@ -2,6 +2,7 @@
 package mirror
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/devpass/devpass-discord-relay/internal/inject"
@@ -32,8 +34,17 @@ type Config struct {
 	// State
 	StateDir string
 
+	// Binaries
+	// DpmuxBin is the path to the dpmux binary (default: "dpmux" on PATH).
+	// Used when spawning a new session from a Discord channel message.
+	DpmuxBin string
+
 	// Timing
 	PollInterval time.Duration // default 1s
+
+	// SpawnBindTimeout is how long to wait for the DB session row after dpmux spawn.
+	// Default 60s.
+	SpawnBindTimeout time.Duration
 }
 
 // DiscordClient is the interface the watcher uses to talk to Discord.
@@ -86,12 +97,53 @@ type Watcher struct {
 	sessions *Sessions
 	throttle *Throttle
 	injector *inject.Injector
+	// claimed guards against double-binding a session from two concurrent paths
+	// (scanSessions and handleSpawnFromDiscord). A session ID is inserted here
+	// the first time it is claimed; subsequent claimants are rejected.
+	claimed claimSet
+}
+
+// claimSet is a thread-safe set of claimed session IDs.
+type claimSet struct {
+	mu   sync.Mutex
+	ids  map[string]bool
+}
+
+func (c *claimSet) init() {
+	c.ids = make(map[string]bool)
+}
+
+// tryAdd returns true and inserts id if it was not already present.
+// Returns false (no-op) if already claimed.
+func (c *claimSet) tryAdd(id string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ids == nil {
+		c.ids = make(map[string]bool)
+	}
+	if c.ids[id] {
+		return false
+	}
+	c.ids[id] = true
+	return true
+}
+
+// copyInto copies all claimed IDs into dst (non-destructive read).
+func (c *claimSet) copyInto(dst map[string]bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id := range c.ids {
+		dst[id] = true
+	}
 }
 
 // NewWatcher creates a watcher. db must already be open read-only.
 func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error) {
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 1 * time.Second
+	}
+	if cfg.SpawnBindTimeout == 0 {
+		cfg.SpawnBindTimeout = 60 * time.Second
 	}
 	sessPath := filepath.Join(cfg.StateDir, "sessions.json")
 	sessions, err := LoadSessions(sessPath)
@@ -129,6 +181,8 @@ func (w *Watcher) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// Merge any sessions claimed by handleSpawnFromDiscord into seen.
+			w.claimed.copyInto(seen)
 			w.scanSessions(ctx, seen)
 		}
 	}
@@ -166,6 +220,12 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 		target, pendingPath, ok := findPendingMarker(w.cfg.StateDir, s.id, s.created)
 		if !ok {
 			// Unmatched session – ignore per spec
+			continue
+		}
+		// Atomically claim this session to prevent double-binding with handleSpawnFromDiscord.
+		if !w.claimed.tryAdd(s.id) {
+			// Already claimed by the spawn path; mark as seen so we stop trying.
+			seen[s.id] = true
 			continue
 		}
 		seen[s.id] = true
@@ -696,6 +756,21 @@ func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
 		return
 	}
 
+	// A message in the relay channel (not a thread) triggers a new session spawn.
+	// Check this before checking known threads so the channel message gets spawned
+	// even if we somehow also manage a thread with the same ID (impossible in practice,
+	// but correctness requires the channel-message path to be checked first).
+	if ev.ChannelID == w.cfg.ChannelID {
+		log.Printf("mirror: channel message received – spawning new dpmux session")
+		go func(content string, atts []MessageAttachment) {
+			// Use a background context so the spawn survives past handleDiscordMessage.
+			if err := w.handleSpawnFromDiscord(context.Background(), content, atts); err != nil {
+				log.Printf("mirror: spawn from Discord: %v", err)
+			}
+		}(ev.Content, ev.Attachments)
+		return
+	}
+
 	// Find the session that owns this thread.
 	var rec *SessionRecord
 	for _, r := range w.sessions.All() {
@@ -734,4 +809,195 @@ func (w *Watcher) handleDiscordMessage(ev MessageEvent) {
 			log.Printf("mirror: inject session %s: %v", sessionID, err)
 		}
 	}(rec.TmuxTarget, rec.SessionID, ev.Content, attachments)
+}
+
+// handleSpawnFromDiscord spawns a new dpmux session in response to a Discord
+// channel message (outside any thread), waits for the new session row to appear
+// in the DB, binds the session (via mirrorSession), and injects the Discord
+// message as the first prompt.
+//
+// Binding contract:
+//   - spawnStart is recorded BEFORE dpmux is invoked.
+//   - Only session rows with time_created >= spawnStart are candidates.
+//   - Among those candidates, only the row whose pending marker name matches
+//     the session name printed by dpmux is accepted.
+//   - Lexicographic ordering of session IDs is never used; the pending marker
+//     (written by dpmux before spawning devpass-code) is the sole pairing key.
+//
+// TODO(phase9): wrap dpmux invocation with systemd-run for process isolation.
+func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, evAtts []MessageAttachment) error {
+	// Record the spawn start instant BEFORE calling dpmux.
+	spawnStartMS := time.Now().UnixMilli()
+
+	// Resolve the dpmux binary.
+	dpmuxBin := w.cfg.DpmuxBin
+	if dpmuxBin == "" {
+		p, err := exec.LookPath("dpmux")
+		if err != nil {
+			return fmt.Errorf("dpmux not found on PATH (set DpmuxBin in Config): %w", err)
+		}
+		dpmuxBin = p
+	}
+
+	// Build the dpmux command.  Inherit the relay's RELAY_STATE_DIR and
+	// RELAY_DEVPASS_DB so dpmux writes the pending marker into the same
+	// directory the relay is watching.
+	cmd := exec.CommandContext(ctx, dpmuxBin)
+	env := os.Environ()
+	if w.cfg.StateDir != "" {
+		env = setEnvVar(env, "RELAY_STATE_DIR", w.cfg.StateDir)
+	}
+	if w.cfg.DBPath != "" {
+		env = setEnvVar(env, "RELAY_DEVPASS_DB", w.cfg.DBPath)
+	}
+	// Unset TMUX so dpmux always creates a fresh tmux session (never new-window
+	// in the relay's own session if the relay runs inside tmux).
+	env = setEnvVar(env, "TMUX", "")
+	cmd.Env = env
+
+	var stdoutBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = os.Stderr
+
+	log.Printf("mirror: spawning dpmux (spawnStart=%d)", spawnStartMS)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("dpmux run: %w", err)
+	}
+
+	// dpmux prints the session name (dp-<unixtime>-<pid>) to stdout.
+	sessionName := strings.TrimSpace(stdoutBuf.String())
+	if sessionName == "" {
+		return fmt.Errorf("dpmux produced no session name on stdout")
+	}
+	log.Printf("mirror: dpmux spawned session %q", sessionName)
+
+	// The pending marker written by dpmux is pending-<sessionName>.
+	pendingMarkerName := "pending-" + sessionName
+	pendingPath := filepath.Join(w.cfg.StateDir, pendingMarkerName)
+
+	// Poll the DB for the new session row.  The row must have
+	// time_created >= spawnStartMS and its pending marker must exist.
+	// Never use lexicographic ordering; never use a process-start baseline
+	// snapshot of existing session IDs.
+	bindTimeout := w.cfg.SpawnBindTimeout
+	deadline := time.Now().Add(bindTimeout)
+
+	var boundSessionID string
+	var tmuxTarget string
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		rows, err := w.db.QueryContext(ctx,
+			`SELECT id, time_created FROM session WHERE parent_id IS NULL AND time_created >= ? ORDER BY time_created ASC`,
+			spawnStartMS)
+		if err != nil {
+			time.Sleep(300 * time.Millisecond)
+			continue
+		}
+
+		found := false
+		for rows.Next() {
+			var sid string
+			var tc int64
+			if err := rows.Scan(&sid, &tc); err != nil {
+				continue
+			}
+			// Verify the pending marker for our specific dpmux session still exists.
+			// We check for this exact marker (not any marker) so that a concurrent
+			// stale spawn's marker cannot steal the bind.
+			data, err := os.ReadFile(pendingPath)
+			if err != nil {
+				// Marker consumed (already removed by scanSessions), or not yet written.
+				// If scanSessions already consumed it (raced us), the session will also
+				// be in w.sessions already; check there.
+				if existing := w.sessions.Get(sid); existing != nil {
+					// Already bound by scanSessions; grab its target.
+					boundSessionID = sid
+					tmuxTarget = existing.TmuxTarget
+					found = true
+					break
+				}
+				continue
+			}
+			// Marker exists; verify it matches this session name.
+			target := strings.TrimSpace(string(data))
+			boundSessionID = sid
+			tmuxTarget = target
+			found = true
+			break
+		}
+		rows.Close()
+
+		if found {
+			break
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+
+	if boundSessionID == "" {
+		return fmt.Errorf("timed out waiting for session row for dpmux session %q (spawnStart=%d)", sessionName, spawnStartMS)
+	}
+
+	log.Printf("mirror: bound new session %s to dpmux %s (target=%s)", boundSessionID, sessionName, tmuxTarget)
+
+	// Atomically claim the session.  If scanSessions won the race and already
+	// claimed it, mirrorSession is running; we only need to inject the prompt.
+	needsMirror := w.claimed.tryAdd(boundSessionID)
+
+	// Remove the pending marker so scanSessions won't try to bind it again.
+	os.Remove(pendingPath)
+
+	if needsMirror {
+		// Register the session into sessions.json so that scanSessions' `seen` map
+		// picks it up on the next tick and skips it.
+		if err := w.sessions.Upsert(&SessionRecord{
+			SessionID:  boundSessionID,
+			TmuxTarget: tmuxTarget,
+			Status:     "active",
+		}); err != nil {
+			log.Printf("mirror: sessions.json pre-upsert for %s: %v", boundSessionID, err)
+		}
+
+		// Mirror the session concurrently (same as scanSessions does).
+		var createdAt int64
+		w.db.QueryRowContext(ctx, `SELECT time_created FROM session WHERE id = ?`, boundSessionID).Scan(&createdAt)
+		go func(sid, target string, ca int64) {
+			if err := w.mirrorSession(ctx, sid, target, ca); err != nil {
+				log.Printf("mirror: mirrorSession(spawn) %s: %v", sid, err)
+			}
+		}(boundSessionID, tmuxTarget, createdAt)
+	}
+
+	// Inject the original Discord message as the first prompt.
+	// Build attachment list.
+	var atts []inject.Attachment
+	for _, a := range evAtts {
+		atts = append(atts, inject.Attachment{Filename: a.Filename, URL: a.URL})
+	}
+
+	// Inject in a separate goroutine; the readiness probe inside Inject will
+	// wait for "Ask anything..." before sending the text.
+	go func(target, sid, text string, attachments []inject.Attachment) {
+		if err := w.injector.Inject(target, sid, text, attachments); err != nil {
+			log.Printf("mirror: inject first prompt into %s: %v", sid, err)
+		}
+	}(tmuxTarget, boundSessionID, content, atts)
+
+	return nil
+}
+
+// setEnvVar sets (or replaces) a KEY=VALUE pair in the given env slice.
+func setEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
