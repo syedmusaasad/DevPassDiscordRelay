@@ -1,0 +1,4 @@
+[
+  {"prompt": "ping", "reply": "Pong. Nothing in flight."},
+  {"prompt": "hello", "reply": "Hello! How can I help you?"}
+]

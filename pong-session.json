@@ -1,0 +1,52 @@
+{
+  "messages": [
+    {
+      "id": "msg_06af7051e00177jC8mE6ynMF34",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500968734,
+      "time_updated": 1788500973228,
+      "data": "{\"role\":\"user\",\"time\":{\"created\":1788500968734},\"agent\":\"pl-interactive\",\"model\":{\"providerID\":\"llmgateway-devpass\",\"modelID\":\"claude-fable-5-1\",\"variant\":\"high\"},\"summary\":{\"diffs\":[]}}"
+    },
+    {
+      "id": "msg_06af7053f001MPAGE89hCPxQ7W",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500968767,
+      "time_updated": 1788500973215,
+      "data": "{\"parentID\":\"msg_06af7051e00177jC8mE6ynMF34\",\"role\":\"assistant\",\"mode\":\"pl-interactive\",\"agent\":\"pl-interactive\",\"variant\":\"high\",\"path\":{\"cwd\":\"/root/devpass-discord-relay\",\"root\":\"/\"},\"cost\":0.00455225,\"tokens\":{\"total\":7605,\"input\":78,\"output\":38,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":7489}},\"modelID\":\"claude-fable-5-1\",\"providerID\":\"llmgateway-devpass\",\"time\":{\"created\":1788500968767,\"completed\":1788500973214},\"finish\":\"stop\"}"
+    }
+  ],
+  "parts": [
+    {
+      "id": "prt_06af70522001swudOa7CIBh0HM",
+      "message_id": "msg_06af7051e00177jC8mE6ynMF34",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500968745,
+      "time_updated": 1788500968747,
+      "data": "{\"type\":\"text\",\"text\":\"ping\"}"
+    },
+    {
+      "id": "prt_06af710db001csq65XMBByA17j",
+      "message_id": "msg_06af7053f001MPAGE89hCPxQ7W",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500971740,
+      "time_updated": 1788500971741,
+      "data": "{\"type\":\"step-start\"}"
+    },
+    {
+      "id": "prt_06af710df001mG108Dzce4n5Lt",
+      "message_id": "msg_06af7053f001MPAGE89hCPxQ7W",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500971743,
+      "time_updated": 1788500973202,
+      "data": "{\"type\":\"text\",\"text\":\"Pong. Nothing in flight from this session (`status --mine` is empty). Waiting on you: nothing.\",\"time\":{\"start\":1788500971743,\"end\":1788500973199}}"
+    },
+    {
+      "id": "prt_06af71696001rIiyTG0V2d5ieX",
+      "message_id": "msg_06af7053f001MPAGE89hCPxQ7W",
+      "session_id": "ses_f9508fb06ffeVaE6nVjHxi6OyA",
+      "time_created": 1788500973206,
+      "time_updated": 1788500973207,
+      "data": "{\"reason\":\"stop\",\"type\":\"step-finish\",\"tokens\":{\"total\":7605,\"input\":78,\"output\":38,\"reasoning\":0,\"cache\":{\"write\":0,\"read\":7489}},\"cost\":0.00455225}"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# dpmux — launch devpass-code in a named tmux session and multiplex its I/O.
+#
+# Usage:
+#   dpmux SESSION_NAME COMMAND [ARGS...]
+#
+# Environment variables forwarded:
+#   XDG_DATA_HOME, FAKE_DP_SCRIPT, FAKE_DP_REFUSE_FIRST_RESUME,
+#   FAKE_DP_READY_DELAY_MS, FAKE_DP_TRANSCRIPT_DELAY_MS, FAKE_DP_SWALLOW_UNTIL_READY
+#
+# Exit codes:
+#   0 — session exited cleanly
+#   1 — usage error
+#   2 — tmux error
+
+set -euo pipefail
+
+usage() {
+  echo "Usage: dpmux SESSION_NAME COMMAND [ARGS...]" >&2
+  exit 1
+}
+
+[[ $# -ge 2 ]] || usage
+
+SESSION="$1"
+shift
+COMMAND="$*"
+
+# Kill any existing session with this name (best-effort)
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+# Build the env forwarding string
+ENV_FWD=""
+for var in XDG_DATA_HOME FAKE_DP_SCRIPT FAKE_DP_REFUSE_FIRST_RESUME \
+           FAKE_DP_READY_DELAY_MS FAKE_DP_TRANSCRIPT_DELAY_MS \
+           FAKE_DP_SWALLOW_UNTIL_READY; do
+  if [[ -n "${!var:-}" ]]; then
+    ENV_FWD="$ENV_FWD $var=${!var}"
+  fi
+done
+
+# Start a new detached tmux session running the command
+tmux new-session -d -s "$SESSION" -x 220 -y 50 \
+  "env $ENV_FWD $COMMAND; echo '[dpmux: process exited]'" 2>&1
+
+echo "[dpmux] session '$SESSION' started" >&2

@@ -1,0 +1,16 @@
+name: devpass-discord-relay-test
+
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: devpass-discord-relay-test:latest
+    # Throwaway HOME; never mounts developer HOME
+    environment:
+      - HOME=/home/testuser
+      - CGO_ENABLED=0
+    # tmux requires a terminal; allocate a pseudo-TTY
+    tty: true
+    # Remove container after run
+    # (handled by --rm in make integration)
