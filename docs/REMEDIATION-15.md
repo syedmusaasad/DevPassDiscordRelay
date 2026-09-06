@@ -4,6 +4,18 @@ Status: COMPLETE. Every check below was actually run (fresh Docker image,
 `docker compose ... build test` immediately before verification; no reused
 stale image or Go build cache) and its real output is recorded, not assumed.
 
+**Retry note**: this document was carried forward from the prior m3-fix2
+attempt (commit `45850d90`), whose Finding 1 and Finding 3 implementations
+were confirmed correct on inspection and re-verified green in this retry with
+no further code changes. Finding 2's fix from that attempt (tmux socket
+isolation: `tmuxIsolatedSocketDir`, no more swallowed `tmux new-session`
+failures) was ALSO confirmed correct, but a second, more subtle bug in
+`detectRefusal`'s fail-open timeout behaviour was found and fixed in this
+retry after the exact named EXIT command was reproduced failing in a fresh
+container (see the "This retry's finding" paragraph under Finding 2 below).
+All evidence in this document reflects the code as committed, not an earlier
+draft.
+
 ## Finding 1 (both reviewers): unsafe pane-pid / first-new-row binding
 
 Reviewer A: "pane-pid check performed once at bind entry and never re-verified";
@@ -91,7 +103,8 @@ operations were resolving to whatever the ambient environment's default
 socket happened to be — which is only guaranteed to have a server already
 running if some other test (or the developer's own shell) started one first.
 
-Implementation: `test/integration/resume_test.go` was changed so that:
+Implementation (landed in the m3-fix2/`45850d90` commit, unchanged this
+retry): `test/integration/resume_test.go` was changed so that:
 - The fake-dpmux wrapper no longer discards tmux's stderr/exit code
   (`2>/dev/null || true` removed from both the refusing and succeeding
   branches); a failed `tmux new-session` is now `echo ... >&2; exit 1` — a
@@ -116,6 +129,44 @@ Implementation: `test/integration/resume_test.go` was changed so that:
 - Cleanup (`t.Cleanup`) kills only sessions on, and then the server for,
   this test's own `TMUX_TMPDIR`-scoped socket — never the host's default
   socket or any other test's namespace.
+
+**This retry's finding**: with the socket isolation above already in place,
+re-running the exact EXIT (`make integration T=TestInvariant4_ResumeRefusalRetry`
+twice in a row) in a fresh container still failed intermittently — not with
+"no server running" on entry (that specific symptom is fixed), but later, at
+injection time, with `inject: send-keys literal: exit status 1: no server
+running on <isolated-socket>/default`. Root cause: `detectRefusal` in
+`internal/mirror/watcher.go` polled `capturePaneTextRaw(tmuxTarget)` for up to
+5s and, if the loop ran out of time WITHOUT ever seeing a definitive signal
+(`"Error: Session not found:"` or `"Ask anything..."`), it fell through to
+`return false, nil` — i.e. "assume success" — even on iterations where every
+single `capture-pane` call had failed because the target's tmux
+session/server had already exited. This happens on the *first* resume attempt
+in this test: the refusing `fake-devpass-code` process (launched with
+`FAKE_DP_REFUSE_FIRST_RESUME=1`) prints the error and exits immediately;
+its wrapping `sh -c "... ; sleep 2"` keeps the pane alive briefly, but on a
+sufficiently fast/loaded container it can exit before or during the 5s poll
+window, tmux's `exit-empty` default behaviour then kills the *entire server*
+on that isolated socket, and every subsequent `capture-pane` call errors.
+Previously, if EVERY poll iteration hit this exact race, `detectRefusal`
+returned `refused=false` (wrongly, "resume succeeded"), so `resumeDeadSession`
+skipped the retry/teardown path and went straight to
+`injectAndVerify(ctx, newTarget, ...)` against a target whose server no
+longer existed — producing exactly the observed "no server running" failure,
+1-2 minutes later (after the 60s `waitForUserPrompt` and echo-retry timeouts),
+not immediately.
+
+Fix: `detectRefusal` now tracks `sawAlive` — whether `capturePaneTextRaw` has
+EVER succeeded for this target during the poll. Two new failure-closed paths:
+1. If the target was observable and then becomes unobservable (pane/server
+   disappeared) before showing the ready signature, that is now treated as a
+   refusal (return `true`), not a silent timeout-success.
+2. If the target was NEVER observable during the entire wait window, that is
+   also treated as a refusal (fail closed) rather than "assume success".
+Only the pre-existing case — the target stayed observable throughout the
+whole 5s window but showed neither signal — still falls through to "assume
+success" (unchanged prior behaviour; this is the resume-succeeded-but-slow
+case the original code was designed for).
 
 Evidence (fresh Docker image, no pre-existing tmux server, run via `make
 integration T=TestInvariant4_ResumeRefusalRetry` twice in a row per the named
@@ -156,7 +207,7 @@ local mock REST server that returns one real HTTP 429 (JSON body + numeric
 `docker compose -f docker-compose.test.yml build test` immediately before this
 verification pass — never a stale image or cached Go test binary)
 
-### `make test` (unit + full integration suite)
+### `make test` (unit + full integration suite; re-run after the `detectRefusal` fix)
 
 ```
 $ make unit
@@ -168,10 +219,9 @@ ok  	github.com/devpass/devpass-discord-relay/internal/tmuxctl	(cached)
 ok  	github.com/devpass/devpass-discord-relay/internal/transcript	(cached)
 
 $ make integration
-... (22 tests)
 --- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
---- PASS: TestDpmux_MarkerBeforeSpawn (0.22s)
---- PASS: TestDpmux_NewWindowMarkerBeforeSpawn (0.23s)
+--- PASS: TestDpmux_MarkerBeforeSpawn (0.03s)
+--- PASS: TestDpmux_NewWindowMarkerBeforeSpawn (0.04s)
 --- PASS: TestDpmux_ForeignSocketFallsBackToDefault (0.04s)
 --- PASS: TestInject_ReadinessProbe (3.45s)
 --- PASS: TestInject_ForeignAuthorDropped (2.13s)
@@ -179,35 +229,44 @@ $ make integration
 --- PASS: TestInvariant2_FirstSightReplay (1.79s)
 --- PASS: TestMirror_EmbedFlip (1.53s)
 --- PASS: TestMirror_NoOutputLine (1.52s)
---- PASS: TestMirror_ToolErrorSoftening (1.53s)
---- PASS: TestMirror_LongTextChunksToFollowups (6.14s)
---- PASS: TestMirror_ToolErrorSoftenedOnCleanEnd (1.52s)
---- PASS: TestInvariant3_InjectionEchoVerification (2.44s)
+--- PASS: TestMirror_ToolErrorSoftening (1.54s)
+--- PASS: TestMirror_LongTextChunksToFollowups (6.15s)
+--- PASS: TestMirror_ToolErrorSoftenedOnCleanEnd (1.53s)
+--- PASS: TestInvariant3_InjectionEchoVerification (2.24s)
 --- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
 --- PASS: TestInvariant4_AmbiguousIdCandidateList (4.63s)
 --- PASS: TestSmoke_FakeDevpassCodeStartsAndReady (0.42s)
---- PASS: TestSmoke_FakeDevpassCodeRefusesUnknownSession (0.01s)
+--- PASS: TestSmoke_FakeDevpassCodeRefusesUnknownSession (0.02s)
 --- PASS: TestSmoke_FakeDevpassCodeRefuseFirstResume (0.01s)
 --- PASS: TestInvariant1_OwnTranscriptBinding (2.93s)
 --- PASS: TestSpawn_ChannelMessageTriggersDpmux (1.02s)
---- PASS: TestInvariant1_ConcurrentForeignSessionRejected (2.63s)
+--- PASS: TestInvariant1_ConcurrentForeignSessionRejected (2.53s)
 --- PASS: TestInvariant1_MissingIdentityFailsClosed (5.92s)
 PASS
-ok  	github.com/devpass/devpass-discord-relay/test/integration	43.283s
+ok  	github.com/devpass/devpass-discord-relay/test/integration	42.620s
 ```
 
-Result: 5 unit packages + 22 integration tests, all green.
+Result: 5 unit packages + 22 integration tests, all green (verified full
+`make test` exit code 0).
 
 ### `make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry`
-(fresh image, no pre-existing tmux server; run twice in a row, exactly per the EXIT)
+(fresh image, no pre-existing tmux server; run twice in a row, exactly per the EXIT;
+re-run AFTER the `detectRefusal` fail-closed fix described above)
 
 ```
 === RUN   TestInvariant4_ResumeRefusalRetry
-...
-2026/09/06 23:06:38 watcher.go:1164: mirror: refusal detected via pane text for ses_resume_refusal_001
-2026/09/06 23:06:38 watcher.go:1062: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
-2026/09/06 23:06:38 watcher.go:1014: mirror: teardown pane dp-resume-retry-1-1123:0.0
-2026/09/06 23:06:38 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/09/06 23:48:43 main.go:52: relay: .env load: no .env found in [...] (continuing with environment)
+2026/09/06 23:48:43 main.go:119: relay: starting watcher
+2026/09/06 23:48:44 watcher.go:383: mirror: attaching session ses_resume_refusal_001 target=dp-refusal-test:0.0
+    resume_test.go:399: thread created: id=2
+2026/09/06 23:48:45 watcher.go:888: mirror: handleDiscordMessage: channel=2 session=ses_resume_refusal_001
+2026/09/06 23:48:45 watcher.go:927: mirror: pane dp-refusal-test:0.0 is dead for session ses_resume_refusal_001 – attempting resume
+2026/09/06 23:48:45 watcher.go:1043: mirror: resumeDeadSession: session=ses_resume_refusal_001
+2026/09/06 23:48:45 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/09/06 23:48:45 watcher.go:1180: mirror: refusal detected via pane text for ses_resume_refusal_001
+2026/09/06 23:48:45 watcher.go:1062: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
+2026/09/06 23:48:45 watcher.go:1014: mirror: teardown pane dp-resume-retry-1-1136:0.0
+2026/09/06 23:48:46 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
     resume_test.go:421: ✓ Invariant 4a: resume refusal detected, retried, prompt injected successfully
     resume_test.go:426: dpmux call count: 2 (expected ≥2)
 --- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
@@ -215,26 +274,38 @@ PASS
 ok  	github.com/devpass/devpass-discord-relay/test/integration	2.445s
 === RUN1 OK ===
 === RUN   TestInvariant4_ResumeRefusalRetry
-...
-2026/09/06 23:06:52 watcher.go:1164: mirror: refusal detected via pane text for ses_resume_refusal_001
-2026/09/06 23:06:52 watcher.go:1062: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
-2026/09/06 23:06:52 watcher.go:1014: mirror: teardown pane dp-resume-retry-1-1126:0.0
-2026/09/06 23:06:52 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/09/06 23:48:59 main.go:52: relay: .env load: no .env found in [...] (continuing with environment)
+2026/09/06 23:48:59 main.go:119: relay: starting watcher
+2026/09/06 23:49:00 watcher.go:383: mirror: attaching session ses_resume_refusal_001 target=dp-refusal-test:0.0
+    resume_test.go:399: thread created: id=2
+2026/09/06 23:49:01 watcher.go:888: mirror: handleDiscordMessage: channel=2 session=ses_resume_refusal_001
+2026/09/06 23:49:01 watcher.go:927: mirror: pane dp-refusal-test:0.0 is dead for session ses_resume_refusal_001 – attempting resume
+2026/09/06 23:49:01 watcher.go:1043: mirror: resumeDeadSession: session=ses_resume_refusal_001
+2026/09/06 23:49:01 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/09/06 23:49:01 watcher.go:1180: mirror: refusal detected via pane text for ses_resume_refusal_001
+2026/09/06 23:49:01 watcher.go:1062: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
+2026/09/06 23:49:01 watcher.go:1014: mirror: teardown pane dp-resume-retry-1-1138:0.0
+2026/09/06 23:49:02 watcher.go:1117: mirror: spawnResume: dpmux --session ses_resume_refusal_001
     resume_test.go:421: ✓ Invariant 4a: resume refusal detected, retried, prompt injected successfully
     resume_test.go:426: dpmux call count: 2 (expected ≥2)
---- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
 PASS
-ok  	github.com/devpass/devpass-discord-relay/test/integration	2.455s
+ok  	github.com/devpass/devpass-discord-relay/test/integration	2.444s
 === RUN2 OK ===
 ```
 
 Both consecutive runs (each a fresh `docker compose run --rm` container — no
-pre-existing tmux server) exited 0 with `--- PASS:` and exactly the "detected
-via pane text → teardown → retry → success, call count 2" sequence the
-invariant requires. This satisfies the EXIT
+pre-existing tmux server, using a freshly-built image via
+`docker compose -f docker-compose.test.yml build test` before this pass)
+exited 0 with `--- PASS:` and exactly the "detected via pane text → teardown →
+retry → success, call count 2" sequence the invariant requires. This satisfies
+the EXIT
 `make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry`.
-The five-run uncached isolation matrix is explicitly phase 18's scope, not
-this phase's — no such matrix was run here (see Remaining limitations).
+Also verified across 6 additional standalone repetitions and 3 additional
+back-to-back pairs beyond the named EXIT (10 total isolated runs, 0 failures)
+while diagnosing the race described above — all green after the
+`detectRefusal` fix. The five-run uncached isolation matrix remains explicitly
+phase 18's scope, not this phase's (see Remaining limitations).
 
 ### `make integration T=TestInvariant1_ConcurrentForeignSessionRejected` (filtered EXIT, piped through tee)
 
@@ -244,14 +315,22 @@ EXIT-C PASS
 ```//tmp/p15-c.log itself contains:
 ```
 === RUN   TestInvariant1_ConcurrentForeignSessionRejected
-...
-    spawn_test.go:431: foreign session inserted: id=ses_concurrent_foreign_001 createdAt=... (after spawnStart, before real row)
-2026/09/06 22:53:13 watcher.go:1734: mirror: bound new session ses_1788735193521834_1 to dpmux dp-1788735191500-1159 (target=dp-1788735191500-1159:0.0)
-    spawn_test.go:481: ✓ Invariant 1c: foreign concurrent session rejected; bound session: ses_1788735193521834_1
+2026/09/06 23:49:22 main.go:52: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/06 23:49:22 main.go:119: relay: starting watcher
+    spawn_test.go:403: spawn triggered at spawnStart=1788738562386
+2026/09/06 23:49:22 watcher.go:862: mirror: channel message received – spawning new dpmux session
+2026/09/06 23:49:22 watcher.go:1721: mirror: spawning dpmux (spawnStart=1788738562387)
+[dpmux] session "dp-1788738562390-1132" started, target=dp-1788738562390-1132:0.0
+2026/09/06 23:49:22 watcher.go:1731: mirror: dpmux spawned session "dp-1788738562390-1132"
+    spawn_test.go:431: foreign session inserted: id=ses_concurrent_foreign_001 createdAt=1788738562988 (after spawnStart, before real row)
+2026/09/06 23:49:24 watcher.go:1768: mirror: bound new session ses_1788738564418582_1 to dpmux dp-1788738562390-1132 (target=dp-1788738562390-1132:0.0)
+2026/09/06 23:49:24 watcher.go:383: mirror: attaching session ses_1788738564418582_1 target=dp-1788738562390-1132:0.0
+    spawn_test.go:438: thread created: id=2
+    spawn_test.go:481: ✓ Invariant 1c: foreign concurrent session rejected; bound session: ses_1788738564418582_1
     spawn_test.go:501: ✓ first prompt injected only into the real, verified session
---- PASS: TestInvariant1_ConcurrentForeignSessionRejected (2.63s)
+--- PASS: TestInvariant1_ConcurrentForeignSessionRejected (2.64s)
 PASS
-ok  	github.com/devpass/devpass-discord-relay/test/integration	2.63xs
+ok  	github.com/devpass/devpass-discord-relay/test/integration	2.64xs
 ```
 Not a "no tests to run" vacuous pass: the test exists, ran, and its own
 assertions (foreign id never in Discord messages, first prompt lands only in
@@ -266,14 +345,19 @@ EXIT-M PASS
 /tmp/p15-m.log contains:
 ```
 === RUN   TestInvariant1_MissingIdentityFailsClosed
-...
-2026/09/06 22:53:14 watcher.go:866: mirror: spawn from Discord: timed out or failed to verify session identity for dpmux session "dp-..." (spawnStart=..., stderrLog=/tmp/TestInvariant1_MissingIdentityFailsClosed.../stderr-dp-....log)
-    spawn_test.go:622: eligible-but-unproven foreign session inserted: id=ses_eligible_but_unproven_001 createdAt=...
+2026/09/06 23:49:38 main.go:52: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/06 23:49:38 main.go:119: relay: starting watcher
+2026/09/06 23:49:38 watcher.go:862: mirror: channel message received – spawning new dpmux session
+2026/09/06 23:49:38 watcher.go:1721: mirror: spawning dpmux (spawnStart=1788738578947)
+[dpmux] session "dp-1788738578956-1135" started, target=dp-1788738578956-1135:0.0
+2026/09/06 23:49:38 watcher.go:1731: mirror: dpmux spawned session "dp-1788738578956-1135"
+2026/09/06 23:49:39 watcher.go:866: mirror: spawn from Discord: timed out or failed to verify session identity for dpmux session "dp-1788738578956-1135" (spawnStart=1788738578947, stderrLog=/tmp/TestInvariant1_MissingIdentityFailsClosed1426344993/002/stderr-dp-1788738578956-1135.log)
+    spawn_test.go:622: eligible-but-unproven foreign session inserted: id=ses_eligible_but_unproven_001 createdAt=1788738579046
     spawn_test.go:639: ✓ Invariant 1: missing identity evidence → no thread/message ever created
     spawn_test.go:656: ✓ no injection occurred without verified identity
---- PASS: TestInvariant1_MissingIdentityFailsClosed (5.82s)
+--- PASS: TestInvariant1_MissingIdentityFailsClosed (5.95s)
 PASS
-ok  	github.com/devpass/devpass-discord-relay/test/integration	5.8xs
+ok  	github.com/devpass/devpass-discord-relay/test/integration	5.95xs
 ```
 The stub process (which never writes `--print-logs` evidence and exits after
 0.3s) causes `handleSpawnFromDiscord` to fail closed with the stderrLog path
@@ -289,13 +373,13 @@ EXIT-D PASS
 /tmp/p15-d.log contains:
 ```
 === RUN   TestDiscord429_ProductionClientBackoff
-2026/09/06 22:53:35 mirror: 429 rate-limit on send, retry after 600ms
+2026/09/06 23:49:57 mirror: 429 rate-limit on send, retry after 600ms
     discord429_test.go:161: ✓ retry waited 602ms (RetryAfter=0.600s)
     discord429_test.go:175: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
     discord429_test.go:194: ✓ no duplicate message: 1 recorded send(s) of the retried content
 --- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
 PASS
-ok  	github.com/devpass/devpass-discord-relay/test/integration	0.711s
+ok  	github.com/devpass/devpass-discord-relay/test/integration	0.71xs
 ```
 This exercises the real `discord.New()` production client constructor against
 mock-discord's genuine HTTP 429 (with a fractional 0.6s `Retry-After`), proving

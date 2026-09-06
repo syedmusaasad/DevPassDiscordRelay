@@ -1157,9 +1157,25 @@ func (w *Watcher) DetectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget string, baselineMS int64) (bool, error) {
 	deadline := time.Now().Add(5 * time.Second)
 
+	// sawAlive tracks whether capturePaneTextRaw has ever succeeded for this
+	// target. This is required to fail closed correctly: a target that never
+	// becomes observable (e.g. its tmux session/server already exited because
+	// the launched process refused and the wrapping shell's tail exited,
+	// tearing down the only session on an isolated socket via tmux's
+	// exit-empty behaviour) must NOT be silently treated as a successful
+	// resume just because the poll loop ran out of time without seeing an
+	// explicit signal. Without this, a fast pane teardown races the poll
+	// loop: every capture-pane call fails with "no server running", no DB
+	// row appears (correctly, since the resume was refused), and the old
+	// code fell through to "assume success" — handing resumeDeadSession a
+	// target that no longer exists, which then fails much later with a
+	// bare "no server running" from send-keys instead of retrying.
+	sawAlive := false
+
 	for time.Now().Before(deadline) {
 		// Signal 1: pane text.
 		if text, err := capturePaneTextRaw(tmuxTarget); err == nil {
+			sawAlive = true
 			if strings.Contains(text, "Error: Session not found:") {
 				log.Printf("mirror: refusal detected via pane text for %s", sessionID)
 				return true, nil
@@ -1179,6 +1195,14 @@ func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 				}
 				return false, nil
 			}
+		} else if sawAlive {
+			// The pane WAS observable and is now gone without ever showing the
+			// ready signature. A process that disappears before becoming ready
+			// never successfully resumed; treat this as a refusal so the
+			// caller retries/tears down instead of proceeding to inject into a
+			// target that no longer exists.
+			log.Printf("mirror: refusal detected via pane disappearance before ready for %s (target=%s)", sessionID, tmuxTarget)
+			return true, nil
 		}
 
 		// Signal 2: new session row with wrong id.
@@ -1194,7 +1218,17 @@ func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 
 		time.Sleep(200 * time.Millisecond)
 	}
-	// Timeout without a definitive signal – assume success.
+	if !sawAlive {
+		// Never once observed the target within the wait window at all. This
+		// is a failure signal, not a silent success: fail closed by treating
+		// it as a refusal so the caller tears down (a no-op, since nothing
+		// exists) and retries with a fresh spawn, rather than handing back a
+		// target that was never confirmed alive.
+		log.Printf("mirror: refusal detection could never observe target %s for %s – treating as refused", tmuxTarget, sessionID)
+		return true, nil
+	}
+	// Timeout without a definitive signal, but the target was observably
+	// alive throughout – assume success (unchanged prior behaviour).
 	return false, nil
 }
 
