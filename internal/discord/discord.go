@@ -27,11 +27,33 @@ func New(cfg Config) (*Client, error) {
 		// discordgo derives all API paths from EndpointDiscord at package level.
 		discordgo.EndpointDiscord = cfg.APIURL + "/"
 		discordgo.EndpointAPI = cfg.APIURL + "/api/v" + discordgo.APIVersion + "/"
+		// EndpointChannels (and everything derived from it, e.g.
+		// EndpointChannelMessages/EndpointChannelMessageThread) is a package
+		// variable computed once from the OLD EndpointAPI at discordgo's
+		// package-init time. Re-deriving only EndpointAPI above is not
+		// sufficient: ChannelMessageSend/Edit/CreateThread would otherwise
+		// still target the real discord.com REST API. Every endpoint var that
+		// callers below actually use must be re-derived explicitly.
+		discordgo.EndpointChannels = discordgo.EndpointAPI + "channels/"
+		discordgo.EndpointGuilds = discordgo.EndpointAPI + "guilds/"
+		discordgo.EndpointUsers = discordgo.EndpointAPI + "users/"
+		discordgo.EndpointWebhooks = discordgo.EndpointAPI + "webhooks/"
+		discordgo.EndpointGateway = discordgo.EndpointAPI + "gateway"
 	}
 	s, err := discordgo.New("Bot " + cfg.Token)
 	if err != nil {
 		return nil, err
 	}
+	// Disable discordgo's internal rate-limit retry/sleep loop so that a real
+	// 429 response surfaces to the caller as *discordgo.RateLimitError instead
+	// of being silently slept-and-retried inside discordgo. MaxRestRetries only
+	// bounds a *separate* 502 retry path and does not disable this 429 loop
+	// (see discordgo's RequestWithLockedBucket: `if cfg.ShouldRetryOnRateLimit {
+	// ... time.Sleep(rl.RetryAfter) ... } else { err = &RateLimitError{...} }`).
+	// The relay's own bounded, context-cancellable retry + channel-throttle
+	// code (discordSend/discordEdit in internal/mirror) is what must own 429
+	// handling in production, not discordgo.
+	s.ShouldRetryOnRateLimit = false
 	return &Client{Session: s, cfg: cfg}, nil
 }
 

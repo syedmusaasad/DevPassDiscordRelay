@@ -95,10 +95,20 @@ func runLS() error {
 
 // pendingMarker is the JSON written to pending-<session-name> in stateDir.
 // The relay reads this to bind the session row to the spawn.
+//
+// StderrLog is the phase-16-verified identity evidence: devpass-code is launched
+// with --print-logs --log-level INFO and its stderr is redirected to this unique,
+// per-pane file.  When devpass-code creates a new session row, it writes
+// "message=created id=ses_<ID>" to stderr.  Because this file is exclusive to
+// this one launched process, it is mechanically impossible for a foreign
+// process's session id to appear in it.  This is the sole production identity
+// mechanism (see docs/BINDING-PROTOCOL.md); Nonce is retained only for legacy
+// marker-format compatibility and is not used to prove ownership.
 type pendingMarker struct {
 	Target       string `json:"target"`       // tmux target (e.g. "dp-123:0.0")
-	Nonce        string `json:"nonce"`        // random hex nonce also embedded in session title
+	Nonce        string `json:"nonce"`        // legacy; not used for production identity
 	SpawnInstant int64  `json:"spawnInstant"` // time.Now().UnixMilli() when marker was written
+	StderrLog    string `json:"stderrLog"`    // path to this launch's exclusive stderr log file
 }
 
 // generateNonce returns 16 random hex bytes.
@@ -146,9 +156,15 @@ func runLaunch(args []string) error {
 		dpArgs = append([]string{"--auto"}, dpArgs...)
 	}
 
-	// Generate a nonce that will be embedded in both the pending marker and the
-	// devpass-code session title, allowing the relay to prove the binding is its own.
+	// Generate a nonce (legacy marker field only; not used to prove identity).
 	nonce := generateNonce()
+
+	// stderrLog is this launch's exclusive identity-evidence file (phase-16
+	// verified protocol): devpass-code is launched with --print-logs
+	// --log-level INFO and its stderr is redirected here.  When the session
+	// row is created, devpass-code logs "message=created id=ses_<ID>" to this
+	// file, which no other process can write to.
+	stderrLog := filepath.Join(stateDir, "stderr-"+sessionName+".log")
 
 	// Detect if we're inside a tmux pane on the DEFAULT per-uid socket.
 	// The TMUX env var format is: <socket-path>,<server-pid>,<window-index>
@@ -175,13 +191,14 @@ func runLaunch(args []string) error {
 				Target:       tmuxTarget,
 				Nonce:        nonce,
 				SpawnInstant: time.Now().UnixMilli(),
+				StderrLog:    stderrLog,
 			}
 			markerJSON, _ := json.Marshal(marker)
 			if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
 				return fmt.Errorf("write pending marker: %w", err)
 			}
 
-			launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce)
+			launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce, stderrLog)
 			launchErr := exec.Command("tmux", "new-window", "-t", hostSessionName, "-n", windowName,
 				"-d", launchCmd).Run()
 			if launchErr == nil {
@@ -207,13 +224,14 @@ func runLaunch(args []string) error {
 		Target:       tmuxTarget,
 		Nonce:        nonce,
 		SpawnInstant: time.Now().UnixMilli(),
+		StderrLog:    stderrLog,
 	}
 	markerJSON, _ := json.Marshal(marker)
 	if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
 		return fmt.Errorf("write pending marker: %w", err)
 	}
 
-	launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce)
+	launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce, stderrLog)
 	// Run tmux on the default socket by name ("-L default") rather than relying
 	// on the inherited TMUX env var.  When the process is already inside a
 	// non-default tmux server, the TMUX env var would cause "new-session" to
@@ -235,11 +253,14 @@ func runLaunch(args []string) error {
 // variables that the devpass-code process needs but may not inherit via the
 // tmux server's stored environment.  Currently forwards:
 //   - RELAY_DEVPASS_DB    → passed verbatim so fake-devpass-code can find the DB
-//   - RELAY_SPAWN_NONCE   → the per-spawn nonce embedded in the pending marker;
-//     fake-devpass-code writes it into the session title so the relay can verify
-//     the binding is its own
+//   - RELAY_SPAWN_NONCE   → legacy; retained for marker-format compatibility only
 //   - FAKE_DP_*           → test fault-injection knobs
-func buildDevpassCmd(devpassBin string, args []string, nonce string) string {
+//
+// It always appends --print-logs --log-level INFO and redirects stderr to
+// stderrLog: this is the phase-16-verified identity protocol (see
+// docs/BINDING-PROTOCOL.md). The redirection is unconditional and not hidden
+// (no "2>/dev/null || true"); a launch failure surfaces via the tmux exit code.
+func buildDevpassCmd(devpassBin string, args []string, nonce string, stderrLog string) string {
 	// Collect env vars to forward explicitly.
 	var envPairs []string
 	for _, key := range []string{
@@ -260,7 +281,7 @@ func buildDevpassCmd(devpassBin string, args []string, nonce string) string {
 		envPairs = append(envPairs, "RELAY_SPAWN_NONCE="+shellQuote(nonce))
 	}
 
-	parts := make([]string, 0, len(args)+1+len(envPairs)+1)
+	parts := make([]string, 0, len(args)+3+len(envPairs)+1+2)
 	if len(envPairs) > 0 {
 		parts = append(parts, "env")
 		parts = append(parts, envPairs...)
@@ -269,7 +290,18 @@ func buildDevpassCmd(devpassBin string, args []string, nonce string) string {
 	for _, a := range args {
 		parts = append(parts, shellQuote(a))
 	}
-	return strings.Join(parts, " ")
+	// Identity-evidence flags (phase-16-verified protocol): devpass-code must be
+	// launched with these so it logs "message=created id=ses_<ID>" to stderr.
+	parts = append(parts, "--print-logs", "--log-level", "INFO")
+	cmd := strings.Join(parts, " ")
+	if stderrLog != "" {
+		// Redirect stderr to the exclusive per-launch log file. Never hide the
+		// failure of this redirection or of the launched process; any error is
+		// visible via the tmux pane / exit status, unlike a swallowed
+		// "2>/dev/null || true".
+		cmd = cmd + " 2>>" + shellQuote(stderrLog)
+	}
+	return cmd
 }
 
 // shellQuote wraps a string in single quotes for shell safety.

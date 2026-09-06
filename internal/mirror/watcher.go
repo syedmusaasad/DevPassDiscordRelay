@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -201,6 +202,27 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 	return w, nil
 }
 
+// NewWatcherForTest builds a minimal Watcher around a real DiscordClient
+// (e.g. wrapping the production discord.New() client) for tests that need to
+// exercise the relay's own 429 retry/throttle path (discordSend) without a
+// full DB/tmux/dpmux fixture. It uses an in-memory sessions store and default
+// throttle settings, matching what NewWatcher configures.
+func NewWatcherForTest(discord DiscordClient) (*Watcher, error) {
+	return &Watcher{
+		discord:  discord,
+		sessions: &Sessions{records: make(map[string]*SessionRecord)},
+		throttle: NewThrottle(5, 5*time.Second),
+	}, nil
+}
+
+// DiscordSendForTest is the exported form of discordSend used by tests that
+// need to exercise the relay's bounded, context-cancellable 429 retry path
+// against a real DiscordClient (see discordSend for the actual logic: on a
+// rate-limit error it extracts RetryAfter, sleeps, and retries exactly once).
+func (w *Watcher) DiscordSendForTest(channelID, content string) (MsgRef, error) {
+	return w.discordSend(channelID, content)
+}
+
 // Run starts the watcher loop until ctx is cancelled.
 func (w *Watcher) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.PollInterval)
@@ -279,20 +301,35 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 }
 
 // spawnMarkerJSON is the JSON format of a pending marker written by dpmux.
+//
+// StderrLog is the phase-16-verified production identity evidence: the exact
+// tmux pane's devpass-code process (launched with --print-logs --log-level
+// INFO) has its stderr redirected exclusively to this file. When it creates a
+// new session row, it logs "message=created id=ses_<ID>" there — a line no
+// other process can write, because the file belongs to this one launch only.
+// See docs/BINDING-PROTOCOL.md.
 type spawnMarkerJSON struct {
 	Target       string `json:"target"`
-	Nonce        string `json:"nonce"`
+	Nonce        string `json:"nonce"` // legacy; not used to prove identity
 	SpawnInstant int64  `json:"spawnInstant"`
+	StderrLog    string `json:"stderrLog"`
 }
 
-// findPendingMarker looks for a pending-<name> marker file in stateDir.
-// It matches by nonce: the marker's nonce must appear in the session's title
-// column (stored as "nonce:<hex>"). The session must also have been created
-// at or after the marker's spawnInstant (no grace period).
+// findPendingMarker looks for a pending-<name> marker file in stateDir that
+// can be proven to own sessionID.
 //
-// Legacy plain-text markers (non-JSON, pre-nonce) are accepted only when the
-// session was created strictly after the marker was written (no grace period,
-// no backwards allowance) to avoid binding stale rows.
+// JSON markers with a StderrLog field are matched using the phase-16-verified
+// production identity protocol: the marker's StderrLog file must contain
+// "message=created id=<sessionID>" (see extractCreatedSessionID), and the
+// session must have been created at or after the marker's spawnInstant.
+// Neither the legacy nonce/title field nor any other heuristic is accepted as
+// proof for these markers; a JSON marker with no StderrLog cannot be matched.
+//
+// Legacy plain-text markers (non-JSON; written directly by older tests) are
+// accepted only when the session was created strictly after the marker was
+// written (no grace period, no backwards allowance) to avoid binding stale
+// rows. This scaffold is retained only for pre-existing tests that write
+// markers directly; it is never how the real, installed CLI is bound.
 func findPendingMarker(stateDir string, sessionID string, createdAt int64, sessionTitle string) (target, pendingPath string, ok bool) {
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
@@ -308,16 +345,20 @@ func findPendingMarker(stateDir string, sessionID string, createdAt int64, sessi
 			continue
 		}
 
-		// Try parsing as JSON (nonce-bearing marker).
+		// Try parsing as JSON.
 		var m spawnMarkerJSON
-		if jsonErr := json.Unmarshal(data, &m); jsonErr == nil && m.Nonce != "" {
+		if jsonErr := json.Unmarshal(data, &m); jsonErr == nil && (m.StderrLog != "" || m.Nonce != "") {
 			// Session must have been created at or after the spawn instant.
 			if createdAt < m.SpawnInstant {
 				continue
 			}
-			// Session title must contain the nonce.
-			expectedTitle := "nonce:" + m.Nonce
-			if !strings.Contains(sessionTitle, expectedTitle) {
+			if m.StderrLog == "" {
+				// No identity evidence source on this marker; cannot prove
+				// ownership. Do not fall back to title/nonce matching.
+				continue
+			}
+			loggedID, logOK := extractCreatedSessionID(m.StderrLog)
+			if !logOK || loggedID != sessionID {
 				continue
 			}
 			return m.Target, fp, true
@@ -1471,19 +1512,140 @@ func bindSessionByPanePid(
 	return "", false
 }
 
+// ─── Stderr-log session identity binding (production mechanism) ────────────
+//
+// This is the phase-16-verified real protocol (docs/BINDING-PROTOCOL.md):
+// devpass-code is launched with --print-logs --log-level INFO and its stderr
+// is redirected exclusively to one file per launch. When (and only when) that
+// exact process creates a new session row, it logs
+// "message=created id=ses_<ID>" to that file. Because the file is exclusive
+// to the one launched process, no foreign process can ever cause a wrong id
+// to appear in it — this is what makes it sufficient to prove ownership,
+// unlike /proc liveness, row timestamps, or a shared directory, none of which
+// prove who wrote a given row.
+//
+// createdSessionLogRe matches devpass-code's structured log line for session
+// creation, tolerating field order/spacing per logfmt conventions.
+var createdSessionLogRe = regexp.MustCompile(`message=created\s+id=(ses_[A-Za-z0-9_]+)`)
+
+// extractCreatedSessionID reads logPath (a devpass-code stderr redirect file)
+// and returns the session id from the last "message=created id=ses_<ID>" line,
+// if any. Returns ("", false) if the file does not exist, is empty, or
+// contains no such line — this is the fail-closed case (no evidence yet, or
+// ever).
+func extractCreatedSessionID(logPath string) (string, bool) {
+	if logPath == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return "", false
+	}
+	matches := createdSessionLogRe.FindAllStringSubmatch(string(data), -1)
+	if len(matches) == 0 {
+		return "", false
+	}
+	// Use the last match: a resumed/retried launch could in principle append
+	// more than one creation line only if it created more than one row, in
+	// which case the most recent creation is the one that matters.
+	last := matches[len(matches)-1]
+	return last[1], true
+}
+
+// paneAliveFn returns true if the tmux pane target is still alive (has a
+// live foreground process). Overridable in tests.
+type paneAliveFn func(target string) bool
+
+// bindSessionByStderrLog is the production identity binder. It polls logPath
+// for a "message=created id=ses_<ID>" line, and for every candidate id it
+// finds, re-verifies BOTH that the tmux pane is alive AT THAT MOMENT (not just
+// at entry) and that the corresponding DB row exists with
+// time_created >= spawnInstant, before returning it as bound. If the pane
+// dies during the wait, or the log never appears, or the DB row is missing or
+// stale, it fails closed: ("", false). It never falls back to nonce, title,
+// row-time-only, or first-row heuristics.
+func bindSessionByStderrLog(
+	ctx context.Context,
+	db *sql.DB,
+	logPath string,
+	tmuxTarget string,
+	spawnInstant int64,
+	timeout time.Duration,
+	paneAlive paneAliveFn,
+) (string, bool) {
+	if logPath == "" {
+		return "", false
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return "", false
+		default:
+		}
+
+		// Check liveness at THIS moment, not just at entry: a pane that died
+		// during the wait must never be treated as having produced a row.
+		if !paneAlive(tmuxTarget) {
+			return "", false
+		}
+
+		sid, logOK := extractCreatedSessionID(logPath)
+		if logOK && sid != "" {
+			// Cross-check the DB: the row must exist and be at or after
+			// spawnInstant. A missing or stale row is not evidence of
+			// ownership even if the log line is present (e.g. clock skew or
+			// a corrupted/foreign log path).
+			var createdAt int64
+			err := db.QueryRowContext(ctx,
+				`SELECT time_created FROM session WHERE id = ? AND parent_id IS NULL`,
+				sid,
+			).Scan(&createdAt)
+			if err == nil && createdAt >= spawnInstant {
+				return sid, true
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return "", false
+}
+
+// BindSessionByStderrLog is the exported, injectable form used by tests.
+func BindSessionByStderrLog(
+	ctx context.Context,
+	db *sql.DB,
+	logPath string,
+	tmuxTarget string,
+	spawnInstant int64,
+	timeout time.Duration,
+	paneAlive func(target string) bool,
+) (string, bool) {
+	return bindSessionByStderrLog(ctx, db, logPath, tmuxTarget, spawnInstant, timeout, paneAlive)
+}
+
 // handleSpawnFromDiscord spawns a new dpmux session in response to a Discord
 // channel message (outside any thread), waits for the new session row to appear
 // in the DB, binds the session (via mirrorSession), and injects the Discord
 // message as the first prompt.
 //
-// Binding contract:
+// Binding contract (phase-16-verified protocol; see docs/BINDING-PROTOCOL.md):
 //   - spawnStart is recorded BEFORE dpmux is invoked.
-//   - dpmux writes a JSON pending marker containing the spawn instant and tmux target.
-//   - Fast path (nonce): if the marker has a nonce and devpass-code embedded it in
-//     the session title as "nonce:<hex>", the row is matched by title.
-//   - Real path (pane-pid): if no nonce or title match times out, binding falls back
-//     to pane-pid ownership: tmux display-p #{pane_pid} + /proc verification +
-//     time_created >= spawnInstant. This works with the real devpass-code CLI.
+//   - dpmux writes a JSON pending marker containing the spawn instant, tmux
+//     target, and the path to this launch's exclusive stderr log
+//     (StderrLog), and launches devpass-code with --print-logs --log-level
+//     INFO redirected to that file.
+//   - The ONLY accepted evidence is bindSessionByStderrLog: the process's own
+//     stderr log must contain "message=created id=ses_<ID>", the pane must
+//     be alive at the moment that evidence is checked (re-verified on every
+//     poll, not just at entry), and the corresponding DB row must exist with
+//     time_created >= spawnInstant.
+//   - Neither /proc existence alone, process parentage, row timestamps alone,
+//     a title nonce, nor a shared directory is ever treated as sufficient
+//     proof; those may only narrow candidates, never substitute for the log
+//     evidence.
+//   - A missing or ambiguous identity (no log line, pane dies during the
+//     wait, or the row is missing/stale) fails closed: no session is
+//     claimed, no thread is created, and nothing is injected.
 //   - Rows created before the marker's spawnInstant are never accepted.
 //   - Lexicographic ordering of session IDs is never used.
 //
@@ -1556,60 +1718,17 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	bindTimeout := w.cfg.SpawnBindTimeout
 	tmuxTarget := marker.Target
 
-	var boundSessionID string
-
-	// Fast path: if marker has a nonce, poll for the matching session title.
-	// Real devpass-code may not persist RELAY_SPAWN_NONCE in the title, so this
-	// path may produce no match — in that case we fall through to pane-pid binding.
-	if marker.Nonce != "" {
-		nonceTitle := "nonce:" + marker.Nonce
-		deadline := time.Now().Add(bindTimeout / 2) // use half the budget for the fast path
-		for time.Now().Before(deadline) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			var sid string
-			queryErr := w.db.QueryRowContext(ctx,
-				`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? AND title = ? LIMIT 1`,
-				spawnInstant, nonceTitle,
-			).Scan(&sid)
-			if queryErr == nil && sid != "" {
-				// Verify the pending marker still exists (it may have been consumed by
-				// scanSessions already; if so, check sessions.json).
-				if _, statErr := os.Stat(pendingPath); statErr == nil {
-					boundSessionID = sid
-					break
-				}
-				// Marker already consumed by scanSessions.
-				if existing := w.sessions.Get(sid); existing != nil {
-					boundSessionID = sid
-					tmuxTarget = existing.TmuxTarget
-					break
-				}
-				// Marker consumed but session not yet in sessions.json.
-				boundSessionID = sid
-				break
-			}
-			time.Sleep(300 * time.Millisecond)
-		}
+	if marker.StderrLog == "" {
+		// No identity evidence source at all: fail closed. Never claim or
+		// inject into any row without the phase-16-verified protocol.
+		return fmt.Errorf("pending marker for %q has no stderrLog; cannot verify session identity (spawnStart=%d)", sessionName, spawnStartMS)
 	}
 
-	// Real path (pane-pid): if nonce binding did not find a row, prove ownership
-	// via the pane's PID and /proc. This works with the real devpass-code CLI which
-	// does not persist RELAY_SPAWN_NONCE in the session title.
-	if boundSessionID == "" {
-		if sid, ok := bindSessionByPanePid(
-			ctx, w.db, tmuxTarget, spawnInstant, bindTimeout,
-			panePidFromTmux, procExists,
-		); ok {
-			boundSessionID = sid
-		}
-	}
-
-	if boundSessionID == "" {
-		return fmt.Errorf("timed out waiting for session row for dpmux session %q (spawnStart=%d)", sessionName, spawnStartMS)
+	boundSessionID, bound := bindSessionByStderrLog(
+		ctx, w.db, marker.StderrLog, tmuxTarget, spawnInstant, bindTimeout, isTmuxPaneAlive,
+	)
+	if !bound || boundSessionID == "" {
+		return fmt.Errorf("timed out or failed to verify session identity for dpmux session %q (spawnStart=%d, stderrLog=%s)", sessionName, spawnStartMS, marker.StderrLog)
 	}
 
 	log.Printf("mirror: bound new session %s to dpmux %s (target=%s)", boundSessionID, sessionName, tmuxTarget)

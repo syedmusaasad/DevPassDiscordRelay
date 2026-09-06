@@ -24,8 +24,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/devpass/devpass-discord-relay/internal/mirror"
@@ -92,6 +94,11 @@ func runRelay(ctx context.Context) error {
 		DBPath:        dbPath,
 		StateDir:      stateDir,
 		DpmuxBin:      os.Getenv("RELAY_DPMUX_BIN"), // optional override for dpmux binary path
+	}
+	if v := os.Getenv("RELAY_SPAWN_BIND_TIMEOUT_MS"); v != "" {
+		if ms, parseErr := strconv.Atoi(v); parseErr == nil && ms > 0 {
+			cfg.SpawnBindTimeout = time.Duration(ms) * time.Millisecond
+		}
 	}
 
 	w, err := mirror.NewWatcher(cfg, db, dc)

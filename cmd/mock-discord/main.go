@@ -18,7 +18,10 @@
 //
 //	POST /control/dispatch      body: {"t":"MESSAGE_CREATE","d":{...}}  — inject gateway event
 //	GET  /control/sent          — return all messages the relay sent (array)
-//	POST /control/ratelimit     body: {"path":"/channels/X/messages","retry_after":1.0}
+//	POST /control/ratelimit     body: {"path":"/channels/X/messages","retry_after":1.0,"count":1}
+//	                            count>0 limits how many consecutive requests to
+//	                            this path receive a 429 before it clears itself
+//	                            (0 or omitted means "429 forever until cleared").
 //	DELETE /control/sent        — clear sent log
 package main
 
@@ -56,14 +59,16 @@ type gatewayMsg struct {
 // ── Shared state ─────────────────────────────────────────────────────────────
 
 type server struct {
-	mu         sync.Mutex
-	sent       []json.RawMessage      // everything the relay POSTed to our REST API
-	events     chan json.RawMessage    // events to dispatch to connected WS clients
-	wsConns    []*websocket.Conn
-	ratelimits map[string]float64     // path -> retry_after seconds
-	channels   map[string][]storedMsg // channelID -> messages
-	nextMsgID  int64
-	gwPort     string                 // gateway WS port (for returning in REST gateway endpoint)
+	mu           sync.Mutex
+	sent         []json.RawMessage      // everything the relay POSTed to our REST API
+	events       chan json.RawMessage    // events to dispatch to connected WS clients
+	wsConns      []*websocket.Conn
+	ratelimits   map[string]float64     // path -> retry_after seconds
+	ratelimitCnt map[string]int         // path -> remaining 429 responses (0 = unlimited)
+	reqCounts    map[string]int         // path -> total requests received (any status)
+	channels     map[string][]storedMsg // channelID -> messages
+	nextMsgID    int64
+	gwPort       string                 // gateway WS port (for returning in REST gateway endpoint)
 }
 
 type storedMsg struct {
@@ -75,9 +80,11 @@ type storedMsg struct {
 
 func newServer() *server {
 	return &server{
-		events:     make(chan json.RawMessage, 64),
-		ratelimits: make(map[string]float64),
-		channels:   make(map[string][]storedMsg),
+		events:       make(chan json.RawMessage, 64),
+		ratelimits:   make(map[string]float64),
+		ratelimitCnt: make(map[string]int),
+		reqCounts:    make(map[string]int),
+		channels:     make(map[string][]storedMsg),
 	}
 }
 
@@ -114,6 +121,7 @@ func main() {
 	mux.HandleFunc("/control/dispatch", srv.handleControlDispatch)
 	mux.HandleFunc("/control/sent", srv.handleControlSent)
 	mux.HandleFunc("/control/ratelimit", srv.handleControlRatelimit)
+	mux.HandleFunc("/control/reqcount", srv.handleControlReqCount)
 
 	// Gateway URL endpoint (discordgo fetches this before connecting)
 	mux.HandleFunc("/api/v10/gateway", func(w http.ResponseWriter, r *http.Request) {
@@ -235,6 +243,17 @@ func (s *server) handleREST(w http.ResponseWriter, r *http.Request) {
 	// Check rate limit injection
 	s.mu.Lock()
 	retryAfter, limited := s.ratelimits[path]
+	s.reqCounts[path]++
+	if limited {
+		if remaining, hasCount := s.ratelimitCnt[path]; hasCount && remaining > 0 {
+			remaining--
+			s.ratelimitCnt[path] = remaining
+			if remaining == 0 {
+				delete(s.ratelimits, path)
+				delete(s.ratelimitCnt, path)
+			}
+		}
+	}
 	s.mu.Unlock()
 	if limited {
 		w.Header().Set("X-RateLimit-Remaining", "0")
@@ -350,6 +369,7 @@ func (s *server) handleControlRatelimit(w http.ResponseWriter, r *http.Request) 
 	var body struct {
 		Path       string  `json:"path"`
 		RetryAfter float64 `json:"retry_after"`
+		Count      int     `json:"count"` // number of consecutive 429s before auto-clear; 0 = unlimited
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -358,11 +378,29 @@ func (s *server) handleControlRatelimit(w http.ResponseWriter, r *http.Request) 
 	s.mu.Lock()
 	if body.RetryAfter <= 0 {
 		delete(s.ratelimits, body.Path)
+		delete(s.ratelimitCnt, body.Path)
 	} else {
 		s.ratelimits[body.Path] = body.RetryAfter
+		if body.Count > 0 {
+			s.ratelimitCnt[body.Path] = body.Count
+		} else {
+			delete(s.ratelimitCnt, body.Path)
+		}
 	}
 	s.mu.Unlock()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleControlReqCount returns the number of REST requests received for a
+// given path (query param "path"), regardless of status code. Used by tests
+// to assert bounded retry behavior (no internal discordgo 429 retry storm).
+func (s *server) handleControlReqCount(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+	s.mu.Lock()
+	count := s.reqCounts[path]
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"count": count})
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

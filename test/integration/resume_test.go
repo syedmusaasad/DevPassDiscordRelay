@@ -192,6 +192,19 @@ func TestInvariant4_ResumeRefusalRetry(t *testing.T) {
 	relayBin := mustBin(t, "relay")
 	mockDS := mustBin(t, "mock-discord")
 
+	// Isolated tmux socket namespace for this test only: a fresh TMUX_TMPDIR
+	// so no component of this test ever depends on (or leaks into) another
+	// test's tmux server, and this test never depends on a tmux server left
+	// running by anything else on the host. Every tmux invocation below —
+	// the relay's own isTmuxPaneAlive/capturePaneTextRaw/teardownPaneTarget
+	// calls (inherited via relayCmd.Env), the fake-dpmux wrapper's
+	// "tmux new-session" calls (also inherited via relayCmd.Env, since the
+	// wrapper is spawned by the relay process), and this test's own cleanup
+	// listing — resolve the SAME default socket under this directory because
+	// they all inherit TMUX_TMPDIR from the same source. TMUX is explicitly
+	// unset so no ambient session leaks in either.
+	tmuxTmpDir := tmuxIsolatedSocketDir(t)
+
 	xdgHome := t.TempDir()
 	stateDir := t.TempDir()
 	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
@@ -250,8 +263,27 @@ func TestInvariant4_ResumeRefusalRetry(t *testing.T) {
 	fakeDpmuxScript := filepath.Join(t.TempDir(), "fake-dpmux-resume")
 	// Script uses environment variables FAKE_DPMUX_* set when it's invoked.
 	// This avoids quoting issues with temp dir paths.
+	//
+	// IMPORTANT: tmux launch failures are never hidden here. The previous
+	// "2>/dev/null || true" swallowed both stderr and a non-zero exit code
+	// from `tmux new-session`, so a real launch failure (e.g. "no server
+	// running" on a stale/missing socket) would silently fall through and
+	// only surface later as the test's 60s waitForUserPrompt timeout. Now:
+	//   - stderr is captured to a file and printed by the script itself on
+	//     failure (visible in the relay's inherited stderr, which the test
+	//     process also captures via relayCmd.Stderr = os.Stderr).
+	//   - a failed `tmux new-session` is a hard failure: the wrapper exits
+	//     non-zero instead of masking it, exactly matching what dpmux itself
+	//     does on a real launch failure (see cmd/dpmux/main.go's unguarded
+	//     `tmux new-session ... .Run()`).
+	//   - the wrapper waits for `tmux has-session` to actually report the
+	//     session exists before returning, instead of assuming success the
+	//     instant the tmux command returns.
 	scriptContent := `#!/bin/sh
 # Fake dpmux: counts calls and uses FAKE_DP_REFUSE_FIRST_RESUME on the first.
+# No tmux failure is ever swallowed: every "tmux new-session" below is run
+# without "2>/dev/null || true", so a genuine launch failure (e.g. missing
+# server on this test's own socket namespace) is a hard, visible failure.
 COUNT_FILE="$FAKE_DPMUX_COUNT_FILE"
 STATE_DIR="$FAKE_DPMUX_STATE_DIR"
 XDG_HOME="$FAKE_DPMUX_XDG_HOME"
@@ -281,17 +313,33 @@ done
 if [ "$count" -eq 1 ]; then
   # First call: refuse (FAKE_DP_REFUSE_FIRST_RESUME=1).
   # Use sh -c to add a trailing sleep so the pane text is visible for detection.
-  tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
+  if ! tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
     sh -c "env XDG_DATA_HOME=\"$XDG_HOME\" RELAY_DEVPASS_DB=\"$DB_PATH\" \
-      FAKE_DP_REFUSE_FIRST_RESUME=1 \"$FAKEBIN\" --session \"$SESSION_ID\"; sleep 2" \
-    2>/dev/null || true
+      FAKE_DP_REFUSE_FIRST_RESUME=1 \"$FAKEBIN\" --session \"$SESSION_ID\"; sleep 2"; then
+    echo "fake-dpmux-resume: tmux new-session (attempt 1) failed" >&2
+    exit 1
+  fi
 else
   # Second call: resume succeeds.
-  tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
+  if ! tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
     env "XDG_DATA_HOME=$XDG_HOME" "RELAY_DEVPASS_DB=$DB_PATH" \
-    "$FAKEBIN" --auto --session "$SESSION_ID" \
-    2>/dev/null || true
+    "$FAKEBIN" --auto --session "$SESSION_ID"; then
+    echo "fake-dpmux-resume: tmux new-session (attempt $count) failed" >&2
+    exit 1
+  fi
 fi
+
+# Wait for the actual tmux session to exist before returning; never assume
+# success just because the launch command itself exited 0.
+i=0
+while ! tmux has-session -t "$SESSION_NAME" 2>/dev/null; do
+  i=$((i + 1))
+  if [ "$i" -ge 50 ]; then
+    echo "fake-dpmux-resume: session $SESSION_NAME never came up after launch" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
 
 echo "$SESSION_NAME"
 `
@@ -300,9 +348,12 @@ echo "$SESSION_NAME"
 		t.Fatal(err)
 	}
 
-	// Start relay.
+	// Start relay. TMUX_TMPDIR pins the relay (and everything it launches —
+	// the fake-dpmux wrapper and the tmux sessions it starts) to this test's
+	// own private tmux socket namespace; TMUX is unset so no ambient session
+	// from the calling shell leaks in.
 	relayCmd := exec.Command(relayBin)
-	relayCmd.Env = append(os.Environ(),
+	relayCmd.Env = append(envWithoutTmux(),
 		"DISCORD_TOKEN=test-token",
 		"DISCORD_CHANNEL_ID=test-refusal-ch",
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
@@ -310,6 +361,7 @@ echo "$SESSION_NAME"
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
 		"DISCORD_USER_ID=user-refusal-001",
 		fmt.Sprintf("RELAY_DPMUX_BIN=%s", fakeDpmuxScript),
+		fmt.Sprintf("TMUX_TMPDIR=%s", tmuxTmpDir),
 		// Pass config to fake-dpmux via env (avoids shell quoting issues).
 		fmt.Sprintf("FAKE_DPMUX_COUNT_FILE=%s", callCountFile),
 		fmt.Sprintf("FAKE_DPMUX_STATE_DIR=%s", stateDir),
@@ -324,13 +376,19 @@ echo "$SESSION_NAME"
 	}
 	t.Cleanup(func() { relayCmd.Process.Kill() })
 	t.Cleanup(func() {
-		if out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output(); err == nil {
+		// Cleanup only THIS test's own socket namespace: never touch any
+		// other test's or the host's tmux server.
+		if out, err := exec.Command("tmux", "-S", filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default"),
+			"list-sessions", "-F", "#{session_name}").Output(); err == nil {
 			for _, sess := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 				if strings.HasPrefix(sess, "dp-") {
-					exec.Command("tmux", "kill-session", "-t", sess).Run()
+					exec.Command("tmux", "-S", filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default"),
+						"kill-session", "-t", sess).Run()
 				}
 			}
 		}
+		exec.Command("tmux", "-S", filepath.Join(tmuxTmpDir, fmt.Sprintf("tmux-%d", os.Getuid()), "default"),
+			"kill-server").Run()
 	})
 
 	// Wait for relay to create a thread (from the existing assistant turn).
@@ -575,6 +633,48 @@ func insertTestMessageWithProvider(t *testing.T, db *sql.DB, id, sessionID, role
 	if err != nil {
 		t.Fatalf("insertTestMessageWithProvider: %v", err)
 	}
+}
+
+// ── tmux socket isolation helpers ─────────────────────────────────────────
+//
+// TestInvariant4_ResumeRefusalRetry must never depend on (or leak into)
+// another test's tmux server, and must never rely on the host having a
+// pre-existing default-socket tmux server running. tmuxIsolatedSocketDir
+// gives the test its own private TMUX_TMPDIR; every process the test starts
+// (directly, or transitively — the relay binary, and the fake-dpmux wrapper
+// the relay spawns as a subprocess with an inherited environment) resolves
+// tmux's "default" socket underneath this one directory, and nothing else on
+// the host ever touches it.
+
+// tmuxIsolatedSocketDir creates a fresh, per-test TMUX_TMPDIR and registers
+// cleanup that kills only the tmux server on that socket (never the host's
+// default server or any other test's socket).
+func tmuxIsolatedSocketDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Cleanup(func() {
+		killCmd := exec.Command("tmux", "kill-server")
+		killCmd.Env = append(envWithoutTmux(), fmt.Sprintf("TMUX_TMPDIR=%s", dir))
+		killCmd.Run() //nolint:errcheck // no server running is not an error here
+	})
+	return dir
+}
+
+// envWithoutTmux returns os.Environ() with any inherited TMUX and
+// TMUX_TMPDIR stripped, so callers can set their own isolated values without
+// an ambient value from the calling shell (this test process itself may be
+// running inside a tmux pane) leaking through.
+func envWithoutTmux() []string {
+	env := os.Environ()
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_TMPDIR=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	out = append(out, "TMUX=")
+	return out
 }
 
 

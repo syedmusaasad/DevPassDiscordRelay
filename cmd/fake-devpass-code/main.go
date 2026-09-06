@@ -57,6 +57,7 @@ func run(args []string) error {
 	// Parse flags
 	var sessionID string
 	var autoFlag bool
+	var printLogs bool
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--auto":
@@ -65,6 +66,12 @@ func run(args []string) error {
 			if i+1 < len(args) {
 				i++
 				sessionID = args[i]
+			}
+		case "--print-logs":
+			printLogs = true
+		case "--log-level":
+			if i+1 < len(args) {
+				i++ // consume the level value; we always log at INFO-equivalent verbosity
 			}
 		case "--version":
 			fmt.Println(devpassVersion)
@@ -135,6 +142,14 @@ func run(args []string) error {
 			activeSessionID = generateID("ses")
 			if err := insertSession(db, activeSessionID); err != nil {
 				return fmt.Errorf("fake-devpass-code: insert session: %w", err)
+			}
+			// Reproduce the phase-16-verified real devpass-code protocol: log the
+			// newly created session id to stderr in the exact format the real CLI
+			// emits (see docs/BINDING-PROTOCOL.md). Only actual row-creation events
+			// are logged; resuming an existing session never logs this line.
+			if printLogs {
+				fmt.Fprintf(os.Stderr, "time=%s level=INFO service=session message=created id=%s\n",
+					time.Now().UTC().Format(time.RFC3339Nano), activeSessionID)
 			}
 		}
 	}

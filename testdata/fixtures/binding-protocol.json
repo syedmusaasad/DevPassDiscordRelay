@@ -1,0 +1,17 @@
+{
+  "verified": true,
+  "cli_version": "1.18.11",
+  "mechanism": "--log-level INFO --print-logs redirected to stderr per-pane",
+  "observations": {
+    "creation_time": "Session row is not created on launch; it is created only when the first prompt is sent (or injected)",
+    "disambiguation": "Redirecting devpass-code's stderr to a unique, per-tmux-pane file (e.g. 2> /tmp/stderr.log) allows the relay to parse exactly `message=created id=ses_XYZ` emitted exclusively by that specific devpass-code process. Foreign rows created concurrently will not be written to this file.",
+    "resume": "On exact-id resume, the ID is already known and explicitly passed via `--session <id>`; no discovery is needed."
+  },
+  "reproduction_commands": [
+    "mkdir -p /tmp/devpass-code/relay-binding-discovery/xdg/{data,config,cache}/devpass-code",
+    "echo '{\"llmgateway-devpass\":{\"type\":\"api\",\"key\":\"fake_key_123\"}}' > /tmp/devpass-code/relay-binding-discovery/xdg/data/devpass-code/auth.json",
+    "tmux -S /tmp/devpass-code/relay-binding-discovery/tmux.sock new-session -d -s binding_stderr \"env XDG_DATA_HOME=/tmp/devpass-code/relay-binding-discovery/xdg/data devpass-code --log-level INFO --print-logs 2> /tmp/devpass-code/relay-binding-discovery/stderr.log\"",
+    "tmux -S /tmp/devpass-code/relay-binding-discovery/tmux.sock send-keys -t binding_stderr \"hello\" Enter",
+    "grep \"message=created id=ses_\" /tmp/devpass-code/relay-binding-discovery/stderr.log"
+  ]
+}
