@@ -514,3 +514,44 @@ status 0
 $ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
 status 0
 ```
+
+### Final review-remediation verification (2026-09-07)
+
+The Docker image was rebuilt before this final pass with:
+
+```
+$ docker compose -f docker-compose.test.yml build test
+test  Built
+status 0
+```
+
+`make test` then completed with status 0. Its final integration result was:
+
+```
+--- PASS: TestInvariant1_ConcurrentForeignSessionRejected (2.63s)
+--- PASS: TestInvariant1_MissingIdentityFailsClosed (5.92s)
+PASS
+ok   github.com/devpass/devpass-discord-relay/test/integration 42.910s
+```
+
+The remaining named phase-15 commands are executed after this checkpoint and
+recorded with their exact status in the commit evidence. The only deferred
+work remains the explicitly phase-18 five-run uncached isolation matrix; there
+is no remaining ownership, resume-isolation, or production-429 blocker.
+
+The final named commands all exited 0:
+
+```
+$ make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
+
+$ make integration T=TestInvariant1_ConcurrentForeignSessionRejected > /tmp/p15-c.log 2>&1; grep -q -- '--- PASS: TestInvariant1_ConcurrentForeignSessionRejected' /tmp/p15-c.log && ! grep -q 'no tests to run' /tmp/p15-c.log
+status 0
+
+$ make integration T=TestInvariant1_MissingIdentityFailsClosed > /tmp/p15-m.log 2>&1; grep -q -- '--- PASS: TestInvariant1_MissingIdentityFailsClosed' /tmp/p15-m.log && ! grep -q 'no tests to run' /tmp/p15-m.log
+status 0
+
+$ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
+status 0
+```
