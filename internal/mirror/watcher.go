@@ -99,6 +99,10 @@ type Watcher struct {
 	sessions *Sessions
 	throttle *Throttle
 	injector *inject.Injector
+	// runCtx is cancelled when the relay is shutting down.  Discord's REST
+	// interface has no context parameter, so the relay-owned 429 wait must use
+	// this context rather than an unconditional Sleep.
+	runCtx context.Context
 	// claimed guards against double-binding a session from two concurrent paths
 	// (scanSessions and handleSpawnFromDiscord). A session ID is inserted here
 	// the first time it is claimed; subsequent claimants are rejected.
@@ -193,6 +197,7 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 		sessions: sessions,
 		throttle: NewThrottle(5, 5*time.Second),
 		injector: inject.New(cfg.StateDir),
+		runCtx:   context.Background(),
 	}
 
 	// Register incoming message handler for thread replies.
@@ -211,6 +216,7 @@ func NewWatcherForTest(discord DiscordClient) (*Watcher, error) {
 		discord:  discord,
 		sessions: &Sessions{records: make(map[string]*SessionRecord)},
 		throttle: NewThrottle(5, 5*time.Second),
+		runCtx:   context.Background(),
 	}, nil
 }
 
@@ -224,6 +230,7 @@ func (w *Watcher) DiscordSendForTest(channelID, content string) (MsgRef, error) 
 
 // Run starts the watcher loop until ctx is cancelled.
 func (w *Watcher) Run(ctx context.Context) {
+	w.runCtx = ctx
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
 	// Track known session IDs to avoid re-pairing
@@ -706,8 +713,16 @@ func (w *Watcher) updateTextMessage(threadID string, ms *msgState) {
 	}
 }
 
-// discordSend sends a message with 429 retry logic.
+// discordSend sends a message with 429 retry logic using the relay lifecycle
+// context.  A shutdown can therefore interrupt a RetryAfter wait promptly.
 func (w *Watcher) discordSend(channelID, content string) (MsgRef, error) {
+	return w.discordSendContext(w.runCtx, channelID, content)
+}
+
+func (w *Watcher) discordSendContext(ctx context.Context, channelID, content string) (MsgRef, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	msg, err := w.discord.SendMessage(channelID, content)
 	if err == nil {
 		return msg, nil
@@ -715,8 +730,10 @@ func (w *Watcher) discordSend(channelID, content string) (MsgRef, error) {
 	if retryAfter, ok := extractRetryAfter(err); ok {
 		log.Printf("mirror: 429 rate-limit on send, retry after %v", retryAfter)
 		w.throttle.SetBackoff(channelID, retryAfter)
-		time.Sleep(retryAfter)
-		w.throttle.ClearBackoff(channelID)
+		defer w.throttle.ClearBackoff(channelID)
+		if err := waitForRetryAfter(ctx, retryAfter); err != nil {
+			return MsgRef{}, err
+		}
 		return w.discord.SendMessage(channelID, content)
 	}
 	return MsgRef{}, err
@@ -724,6 +741,13 @@ func (w *Watcher) discordSend(channelID, content string) (MsgRef, error) {
 
 // discordEdit edits a message with 429 retry logic.
 func (w *Watcher) discordEdit(channelID, messageID, content string) error {
+	return w.discordEditContext(w.runCtx, channelID, messageID, content)
+}
+
+func (w *Watcher) discordEditContext(ctx context.Context, channelID, messageID, content string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	err := w.discord.EditMessage(channelID, messageID, content)
 	if err == nil {
 		return nil
@@ -731,11 +755,29 @@ func (w *Watcher) discordEdit(channelID, messageID, content string) error {
 	if retryAfter, ok := extractRetryAfter(err); ok {
 		log.Printf("mirror: 429 rate-limit on edit, retry after %v", retryAfter)
 		w.throttle.SetBackoff(channelID, retryAfter)
-		time.Sleep(retryAfter)
-		w.throttle.ClearBackoff(channelID)
+		defer w.throttle.ClearBackoff(channelID)
+		if err := waitForRetryAfter(ctx, retryAfter); err != nil {
+			return err
+		}
 		return w.discord.EditMessage(channelID, messageID, content)
 	}
 	return err
+}
+
+// waitForRetryAfter waits for a relay-owned rate-limit delay without making
+// shutdown wait for the complete RetryAfter duration.
+func waitForRetryAfter(ctx context.Context, retryAfter time.Duration) error {
+	if retryAfter <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(retryAfter)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // extractRetryAfter extracts the retry_after duration from a rate-limit error.
@@ -1490,10 +1532,10 @@ func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
 var createdSessionLogRe = regexp.MustCompile(`message=created\s+id=(ses_[A-Za-z0-9_]+)`)
 
 // extractCreatedSessionID reads logPath (a devpass-code stderr redirect file)
-// and returns the session id from the last "message=created id=ses_<ID>" line,
-// if any. Returns ("", false) if the file does not exist, is empty, or
-// contains no such line — this is the fail-closed case (no evidence yet, or
-// ever).
+// and returns its one unambiguous created-session ID. Repeated observations of
+// the same ID are harmless, but two distinct IDs are ambiguous evidence and
+// fail closed. Returns ("", false) if the file does not exist, is empty,
+// contains no such line, or contains conflicting creation IDs.
 func extractCreatedSessionID(logPath string) (string, bool) {
 	if logPath == "" {
 		return "", false
@@ -1506,11 +1548,13 @@ func extractCreatedSessionID(logPath string) (string, bool) {
 	if len(matches) == 0 {
 		return "", false
 	}
-	// Use the last match: a resumed/retried launch could in principle append
-	// more than one creation line only if it created more than one row, in
-	// which case the most recent creation is the one that matters.
-	last := matches[len(matches)-1]
-	return last[1], true
+	id := matches[0][1]
+	for _, match := range matches[1:] {
+		if match[1] != id {
+			return "", false
+		}
+	}
+	return id, true
 }
 
 // paneAliveFn returns true if the tmux pane target is still alive (has a

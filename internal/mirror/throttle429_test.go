@@ -3,6 +3,7 @@ package mirror
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -120,6 +121,46 @@ func TestThrottle_429Backoff(t *testing.T) {
 		t.Errorf("expected at least %v sleep for 429 backoff, but total elapsed was only %v", minDelay, elapsed)
 	}
 	t.Logf("✓ 429 backoff: %d calls, elapsed=%v (retry_after=%v)", mock.calls, elapsed.Round(time.Millisecond), minDelay)
+}
+
+// TestThrottle_429BackoffCancellation verifies a real relay shutdown does not
+// remain blocked in a Discord RetryAfter sleep. The retry is not issued after
+// cancellation and the channel backoff is cleared.
+func TestThrottle_429BackoffCancellation(t *testing.T) {
+	mock := &mock429DiscordClient{retryMS: 5_000}
+	w := &Watcher{
+		discord:  mock,
+		throttle: NewThrottle(10, 5*time.Second),
+		sessions: &Sessions{path: t.TempDir() + "/sessions.json"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.discordSendContext(ctx, "ch-cancel-429", "hello")
+		done <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for mock.calls == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if mock.calls != 1 {
+		t.Fatalf("expected first request to return 429, got %d calls", mock.calls)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected cancellation error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("429 wait did not stop when relay context was cancelled")
+	}
+	if mock.calls != 1 {
+		t.Fatalf("expected no retry after cancellation, got %d calls", mock.calls)
+	}
 }
 
 // TestExtractRetryAfter verifies the typed and string-fallback paths for rate-limit errors.
@@ -355,5 +396,25 @@ func TestBindSessionByStderrLog_StaleBeforeFreshWins(t *testing.T) {
 	sid, ok := BindSessionByStderrLog(ctx, db, writeCreationEvidence(t, "ses_fresh_002"), "live:0.0", spawnInstant, time.Second, func(string) bool { return true })
 	if !ok || sid != "ses_fresh_002" {
 		t.Errorf("expected verified fresh id, got sid=%q ok=%v", sid, ok)
+	}
+}
+
+func TestExtractCreatedSessionID_AmbiguousEvidenceFailsClosed(t *testing.T) {
+	path := t.TempDir() + "/stderr.log"
+	if err := os.WriteFile(path, []byte("message=created id=ses_real_001\nmessage=created id=ses_foreign_002\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := extractCreatedSessionID(path); ok || id != "" {
+		t.Fatalf("ambiguous creation evidence must fail closed, got id=%q ok=%v", id, ok)
+	}
+}
+
+func TestExtractCreatedSessionID_RepeatedSameEvidenceAccepted(t *testing.T) {
+	path := t.TempDir() + "/stderr.log"
+	if err := os.WriteFile(path, []byte("message=created id=ses_real_001\nmessage=created id=ses_real_001\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := extractCreatedSessionID(path); !ok || id != "ses_real_001" {
+		t.Fatalf("same creation evidence should remain valid, got id=%q ok=%v", id, ok)
 	}
 }

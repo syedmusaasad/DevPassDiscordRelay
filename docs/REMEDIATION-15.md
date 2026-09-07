@@ -432,6 +432,53 @@ PASS6
 
 ## Current-run addendum (2026-09-07)
 
+### Review-remediation checkpoint
+
+This commit follow-up addresses reviewer A's two remaining blockers. Before the
+verification commands recorded below are re-run, ambiguous stderr creation
+evidence is rejected rather than selecting a last ID, and the relay's 429
+backoff wait is tied to the watcher's cancellation context. The exact command
+statuses for this follow-up are recorded in the final addendum after the code
+and regression tests are complete.
+
+Reviewer A finding: `extractCreatedSessionID` now accepts one creation ID only;
+duplicate lines for that same ID remain valid, while two distinct IDs return no
+identity and therefore cannot claim, mirror, or inject into either row.
+`TestExtractCreatedSessionID_AmbiguousEvidenceFailsClosed` covers the conflicting
+case. Reviewer A finding: `discordSend` and `discordEdit` now use a timer raced
+against the relay lifecycle context rather than `time.Sleep`; cancellation
+returns `context.Canceled`, skips the retry, and clears channel backoff.
+`TestThrottle_429BackoffCancellation` covers the send path. The real production
+client remains configured with `ShouldRetryOnRateLimit=false`, as verified by
+the existing HTTP-429 integration regression.
+
+Follow-up verification was performed after `docker compose -f
+docker-compose.test.yml build test` rebuilt the test image (exit status 0):
+
+```
+$ make test
+ok github.com/devpass/devpass-discord-relay/internal/mirror 1.353s
+ok github.com/devpass/devpass-discord-relay/test/integration 43.226s
+status 0
+
+$ make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
+status 0
+
+$ make integration T=TestInvariant1_ConcurrentForeignSessionRejected > /tmp/p15-c.log 2>&1; grep -q -- '--- PASS: TestInvariant1_ConcurrentForeignSessionRejected' /tmp/p15-c.log && ! grep -q 'no tests to run' /tmp/p15-c.log
+status 0
+$ make integration T=TestInvariant1_MissingIdentityFailsClosed > /tmp/p15-m.log 2>&1; grep -q -- '--- PASS: TestInvariant1_MissingIdentityFailsClosed' /tmp/p15-m.log && ! grep -q 'no tests to run' /tmp/p15-m.log
+status 0
+$ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
+status 0
+```
+
+The isolated retry command uses a newly-created Docker container for each
+`make integration` invocation and passed twice with exactly two resume launches.
+No ownership or filtered-test failure remains. The five-run uncached isolation
+matrix remains the explicitly deferred phase-18 follow-up.
+
 The prior review evidence above described the earlier m3-fix2 state. This
 retry additionally removed the remaining unsafe pane-PID/first-new-row helper,
 made every historical fixture state its exact `sessionID`, and made the resume
