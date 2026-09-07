@@ -80,6 +80,16 @@ func (m *mock429DiscordClient) RenameThread(threadID, name string) error { retur
 
 func (m *mock429DiscordClient) OnMessage(fn MessageHandler) {}
 
+func (m *mock429DiscordClient) SendComponents(channelID, content string, components []Component) (MsgRef, error) {
+	return m.SendMessage(channelID, content)
+}
+
+func (m *mock429DiscordClient) EditComponents(channelID, messageID, content string, components []Component) error {
+	return m.EditMessage(channelID, messageID, content)
+}
+
+func (m *mock429DiscordClient) OnInteraction(fn InteractionHandler) {}
+
 // TestThrottle_429Backoff verifies that when a Discord send returns a typed
 // *discordgo.RateLimitError (RetryAfter), the watcher:
 //  1. Extracts the retry_after duration via the *discordgo.RateLimitError primary path.

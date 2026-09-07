@@ -317,6 +317,164 @@ func TestInject_AttachmentPath(t *testing.T) {
 	t.Logf("✓ attachment downloaded to %s (sanitised from %q)", paths[0], atts[0].Filename)
 }
 
+// TestApproval_AutoDenyTimeout verifies a pane-only permission prompt creates
+// buttons and, when unanswered, receives the pinned Reject recipe and is edited
+// to record the automatic denial.
+func TestApproval_AutoDenyTimeout(t *testing.T) {
+	mustBin(t, "tmux")
+	fakeDP := mustBin(t, "fake-devpass-code")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+
+	xdgHome := t.TempDir()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+	mockPort, mockGWPort := "19920", "19921"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionName := "dp-approval-timeout"
+	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-x", "200", "-y", "50", "env",
+		fmt.Sprintf("XDG_DATA_HOME=%s", xdgHome), "FAKE_DP_PERMISSION_PROMPT=1", fakeDP, "--auto")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("start fake picker: %v\n%s", err, out)
+	}
+	paneTarget := sessionName + ":0.0"
+	if err := waitForPaneText(t, paneTarget, "Permission required", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sessionID string
+	if err := waitForSessionRow(t, db, &sessionID, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	if err := os.WriteFile(pendingPath, knownSessionMarker(paneTarget, sessionID), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var created int64
+	if err := db.QueryRow(`SELECT time_created FROM session WHERE id = ?`, sessionID).Scan(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(pendingPath, time.UnixMilli(created-1000), time.UnixMilli(created-1000))
+
+	relayCmd := exec.Command(relayBin)
+	relayCmd.Env = append(os.Environ(), "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001",
+		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort), fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
+		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir), "APPROVAL_TIMEOUT_SECONDS=1")
+	relayCmd.Stdout, relayCmd.Stderr = io.Discard, io.Discard
+	if err := relayCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill() })
+	if err := waitForMessageContent(t, mockPort, "Permission denied automatically", 12*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForPaneText(t, paneTarget, "Permission denied", 5*time.Second); err != nil {
+		t.Fatalf("deny recipe did not resolve pane: %v", err)
+	}
+}
+
+// TestQuestionPicker_MenuSelection verifies the fake-only picker contract: pane
+// options become a Discord select menu and a selected value drives its recipe.
+func TestQuestionPicker_MenuSelection(t *testing.T) {
+	mustBin(t, "tmux")
+	fakeDP := mustBin(t, "fake-devpass-code")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+	xdgHome, stateDir := t.TempDir(), t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+	mockPort, mockGWPort := "19922", "19923"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	sessionName := "dp-question-picker"
+	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-x", "200", "-y", "50", "env",
+		fmt.Sprintf("XDG_DATA_HOME=%s", xdgHome), "FAKE_DP_QUESTION_PICKER=1", fakeDP, "--auto")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("start fake picker: %v\n%s", err, out)
+	}
+	paneTarget := sessionName + ":0.0"
+	if err := waitForPaneText(t, paneTarget, "Choose a fruit", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sessionID string
+	if err := waitForSessionRow(t, db, &sessionID, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	if err := os.WriteFile(pendingPath, knownSessionMarker(paneTarget, sessionID), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var created int64
+	if err := db.QueryRow(`SELECT time_created FROM session WHERE id = ?`, sessionID).Scan(&created); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chtimes(pendingPath, time.UnixMilli(created-1000), time.UnixMilli(created-1000))
+	relayCmd := exec.Command(relayBin)
+	relayCmd.Env = append(os.Environ(), "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001",
+		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort), fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath), fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir), "DISCORD_USER_ID=user-allowed-001")
+	relayCmd.Stdout, relayCmd.Stderr = io.Discard, io.Discard
+	if err := relayCmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill() })
+	var questionID string
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		messages, err := getSentMessages(mockPort)
+		if err == nil {
+			for _, message := range messages {
+				var body struct {
+					Content    string `json:"content"`
+					Components []struct {
+						Components []struct {
+							CustomID string `json:"custom_id"`
+						} `json:"components"`
+					} `json:"components"`
+				}
+				if json.Unmarshal(message, &body) == nil && strings.Contains(body.Content, "Choose a fruit") && len(body.Components) > 0 && len(body.Components[0].Components) > 0 {
+					questionID = body.Components[0].Components[0].CustomID
+					break
+				}
+			}
+		}
+		if questionID != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if questionID == "" {
+		t.Fatal("question select menu was not posted")
+	}
+	interaction := map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{
+		"id": "interaction-question-001", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2",
+		"member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001", "bot": false}},
+		"data":   map[string]interface{}{"custom_id": questionID, "component_type": 3, "values": []string{"1"}},
+	}}
+	if err := dispatchEvent(mockPort, interaction); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForPaneText(t, paneTarget, "Question answered", 5*time.Second); err != nil {
+		t.Fatalf("select recipe did not resolve picker: %v", err)
+	}
+}
+
 // ── helpers specific to inject tests ─────────────────────────────────────────
 
 // buildMessageEvent constructs a MESSAGE_CREATE gateway event map.

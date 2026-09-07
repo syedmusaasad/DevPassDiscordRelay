@@ -76,6 +76,16 @@ func (a *mirrorDiscordAdapter) RenameThread(threadID, name string) error {
 
 func (a *mirrorDiscordAdapter) OnMessage(fn mirror.MessageHandler) {}
 
+func (a *mirrorDiscordAdapter) SendComponents(channelID, content string, components []mirror.Component) (mirror.MsgRef, error) {
+	return a.SendMessage(channelID, content)
+}
+
+func (a *mirrorDiscordAdapter) EditComponents(channelID, messageID, content string, components []mirror.Component) error {
+	return a.EditMessage(channelID, messageID, content)
+}
+
+func (a *mirrorDiscordAdapter) OnInteraction(fn mirror.InteractionHandler) {}
+
 // TestDiscord429_ProductionClientBackoff is the phase-15 regression for
 // finding 3: it must use the REAL production client constructor
 // (discord.New), not a custom error stub, and must prove the request that

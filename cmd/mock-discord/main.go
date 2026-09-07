@@ -42,10 +42,10 @@ import (
 // ── Gateway protocol constants ───────────────────────────────────────────────
 
 const (
-	opDispatch    = 0
-	opHeartbeat   = 1
-	opIdentify    = 2
-	opHello       = 10
+	opDispatch     = 0
+	opHeartbeat    = 1
+	opIdentify     = 2
+	opHello        = 10
 	opHeartbeatAck = 11
 )
 
@@ -60,15 +60,15 @@ type gatewayMsg struct {
 
 type server struct {
 	mu           sync.Mutex
-	sent         []json.RawMessage      // everything the relay POSTed to our REST API
-	events       chan json.RawMessage    // events to dispatch to connected WS clients
+	sent         []json.RawMessage    // everything the relay POSTed to our REST API
+	events       chan json.RawMessage // events to dispatch to connected WS clients
 	wsConns      []*websocket.Conn
 	ratelimits   map[string]float64     // path -> retry_after seconds
 	ratelimitCnt map[string]int         // path -> remaining 429 responses (0 = unlimited)
 	reqCounts    map[string]int         // path -> total requests received (any status)
 	channels     map[string][]storedMsg // channelID -> messages
 	nextMsgID    int64
-	gwPort       string                 // gateway WS port (for returning in REST gateway endpoint)
+	gwPort       string // gateway WS port (for returning in REST gateway endpoint)
 }
 
 type storedMsg struct {
@@ -191,12 +191,12 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 			case opIdentify:
 				// Send READY
 				dispatch("READY", map[string]interface{}{
-					"v":                10,
-					"user":             map[string]interface{}{"id": "000000000000000001", "username": "mockbot", "discriminator": "0000", "bot": true},
-					"guilds":           []interface{}{},
-					"session_id":       "mock-session",
+					"v":                  10,
+					"user":               map[string]interface{}{"id": "000000000000000001", "username": "mockbot", "discriminator": "0000", "bot": true},
+					"guilds":             []interface{}{},
+					"session_id":         "mock-session",
 					"resume_gateway_url": "ws://127.0.0.1:0",
-					"application":      map[string]interface{}{"id": "000000000000000001", "flags": 0},
+					"application":        map[string]interface{}{"id": "000000000000000001", "flags": 0},
 				})
 			case opHeartbeat:
 				conn.WriteJSON(gatewayMsg{Op: opHeartbeatAck})
@@ -263,7 +263,8 @@ func (s *server) handleREST(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Record the request body
+	// Record the request body and retain it as a channel message so component
+	// interactions delivered by tests resemble Discord's message payload.
 	if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodPut) {
 		var body json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
@@ -282,10 +283,18 @@ func (s *server) handleREST(w http.ResponseWriter, r *http.Request) {
 	case contains(path, "/messages") && r.Method == http.MethodPost:
 		// Create message
 		w.WriteHeader(http.StatusOK)
+		var content string
+		if len(s.sent) > 0 {
+			var body struct {
+				Content string `json:"content"`
+			}
+			_ = json.Unmarshal(s.sent[len(s.sent)-1], &body)
+			content = body.Content
+		}
 		msg := map[string]interface{}{
 			"id":         id,
 			"channel_id": extractChannelID(path),
-			"content":    "",
+			"content":    content,
 			"type":       0,
 			"author":     map[string]interface{}{"id": "000000000000000001", "username": "mockbot", "bot": true},
 		}

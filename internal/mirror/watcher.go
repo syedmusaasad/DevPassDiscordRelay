@@ -13,12 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/devpass/devpass-discord-relay/internal/inject"
+	"github.com/devpass/devpass-discord-relay/internal/tmuxctl"
 	"github.com/devpass/devpass-discord-relay/internal/transcript"
 )
 
@@ -47,6 +49,10 @@ type Config struct {
 	// SpawnBindTimeout is how long to wait for the DB session row after dpmux spawn.
 	// Default 60s.
 	SpawnBindTimeout time.Duration
+
+	// ApprovalTimeout is the maximum time an approval prompt can remain unanswered.
+	// The default is five minutes.
+	ApprovalTimeout time.Duration
 }
 
 // DiscordClient is the interface the watcher uses to talk to Discord.
@@ -59,7 +65,38 @@ type DiscordClient interface {
 	// OnMessage registers a callback invoked for every MESSAGE_CREATE gateway event.
 	// Multiple handlers may be registered; each receives a copy of the event.
 	OnMessage(fn MessageHandler)
+	SendComponents(channelID, content string, components []Component) (MsgRef, error)
+	EditComponents(channelID, messageID, content string, components []Component) error
+	OnInteraction(fn InteractionHandler)
 }
+
+// Component is a transport-neutral Discord message component.
+type Component struct {
+	Type        string
+	CustomID    string
+	Label       string
+	Style       string
+	Placeholder string
+	Options     []ComponentOption
+}
+
+// ComponentOption is one selectable value in a select menu.
+type ComponentOption struct {
+	Label string
+	Value string
+}
+
+// InteractionEvent is the subset of a component interaction used by the relay.
+type InteractionEvent struct {
+	ChannelID string
+	AuthorID  string
+	IsBot     bool
+	CustomID  string
+	Values    []string
+}
+
+// InteractionHandler receives a Discord component interaction.
+type InteractionHandler func(InteractionEvent)
 
 // MessageEvent carries the fields of a Discord MESSAGE_CREATE event that the
 // inject path needs.
@@ -112,7 +149,43 @@ type Watcher struct {
 	// suppressedEchoes tracks (sessionID, promptText) pairs whose Discord echo
 	// has already been posted once. A second appearance of the same prompt in
 	// the DB (due to inject retry) must not be posted again.
-	suppressedEchoes suppressedEchoStore
+	suppressedEchoes    suppressedEchoStore
+	pendingInteractions pendingInteractionStore
+}
+
+// pendingInteractionStore records one outstanding pane interaction per Discord
+// component message. It prevents duplicate clicks and lets the timeout race be
+// resolved exactly once.
+type pendingInteractionStore struct {
+	mu      sync.Mutex
+	entries map[string]pendingInteraction
+}
+
+type pendingInteraction struct {
+	target    string
+	threadID  string
+	messageID string
+	kind      string
+	options   int
+}
+
+func (p *pendingInteractionStore) put(id string, entry pendingInteraction) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.entries == nil {
+		p.entries = make(map[string]pendingInteraction)
+	}
+	p.entries[id] = entry
+}
+
+func (p *pendingInteractionStore) take(id string) (pendingInteraction, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	entry, ok := p.entries[id]
+	if ok {
+		delete(p.entries, id)
+	}
+	return entry, ok
 }
 
 // suppressedEchoStore tracks prompt texts that have already been echoed to
@@ -185,6 +258,9 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 	if cfg.SpawnBindTimeout == 0 {
 		cfg.SpawnBindTimeout = 60 * time.Second
 	}
+	if cfg.ApprovalTimeout == 0 {
+		cfg.ApprovalTimeout = 5 * time.Minute
+	}
 	sessPath := filepath.Join(cfg.StateDir, "sessions.json")
 	sessions, err := LoadSessions(sessPath)
 	if err != nil {
@@ -202,6 +278,7 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 
 	// Register incoming message handler for thread replies.
 	discord.OnMessage(w.handleDiscordMessage)
+	discord.OnInteraction(w.handleInteraction)
 
 	return w, nil
 }
@@ -502,6 +579,12 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 	msgs := make(map[string]*msgState)
 	// Track last assistant message ID for turn-no-output detection
 	var lastAsstMsgID string
+	// Prompt recognition belongs to the pane, not the transcript: approvals have
+	// no blocking transcript part (TRANSCRIPT-SCHEMA.md §Approval prompt).
+	approvalTicker := time.NewTicker(250 * time.Millisecond)
+	defer approvalTicker.Stop()
+	approvalPosted := false
+	questionPosted := false
 
 	sendTyping := func() {
 		if err := w.discord.SendTyping(threadID); err != nil {
@@ -522,6 +605,25 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 			if tmuxTarget != "" && !isTmuxPaneAlive(tmuxTarget) {
 				log.Printf("mirror: tmux pane %s died", tmuxTarget)
 				return nil
+			}
+
+		case <-approvalTicker.C:
+			if tmuxTarget == "" {
+				continue
+			}
+			pane, captureErr := capturePaneText(tmuxTarget)
+			if captureErr != nil {
+				continue
+			}
+			if !approvalPosted && isApprovalPrompt(pane) {
+				approvalPosted = true
+				w.postApproval(threadID, tmuxTarget)
+			}
+			if !questionPosted {
+				if q, ok := parseQuestionPicker(pane); ok {
+					questionPosted = true
+					w.postQuestion(threadID, tmuxTarget, q)
+				}
 			}
 
 		case part, ok := <-ch:
@@ -902,6 +1004,157 @@ func formatToolEmbedSoftened(toolName, callID string) string {
 func isTmuxPaneAlive(target string) bool {
 	err := exec.Command("tmux", "list-panes", "-t", target).Run()
 	return err == nil
+}
+
+func capturePaneText(target string) (string, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// isApprovalPrompt matches the stable visible heading documented in
+// TRANSCRIPT-SCHEMA.md §Approval prompt. Do not infer it from transcript rows:
+// pending permissions are represented only by the pane.
+func isApprovalPrompt(pane string) bool {
+	return strings.Contains(pane, "Permission required") &&
+		strings.Contains(pane, "Allow once") &&
+		strings.Contains(pane, "Reject")
+}
+
+type questionPicker struct {
+	prompt  string
+	options []string
+}
+
+// parseQuestionPicker accepts the fake CLI's deliberately simple picker format:
+//
+//	? Question text
+//	> apple
+//	  pear
+//	enter to confirm
+//
+// The real v1.18.11 CLI exposes no picker (TRANSCRIPT-SCHEMA.md §Question
+// picker), so this parser and its recipe are unverified against the real TUI.
+func parseQuestionPicker(pane string) (questionPicker, bool) {
+	lines := strings.Split(pane, "\n")
+	for i, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "? ") {
+			continue
+		}
+		q := questionPicker{prompt: strings.TrimSpace(strings.TrimPrefix(line, "? "))}
+		for _, optionLine := range lines[i+1:] {
+			trimmed := strings.TrimSpace(optionLine)
+			if strings.EqualFold(trimmed, "enter to confirm") {
+				break
+			}
+			if strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(optionLine, "  ") {
+				value := strings.TrimSpace(strings.TrimLeft(trimmed, ">"))
+				if value != "" {
+					q.options = append(q.options, value)
+				}
+			}
+		}
+		if q.prompt != "" && len(q.options) > 0 {
+			return q, true
+		}
+	}
+	return questionPicker{}, false
+}
+
+func (w *Watcher) postApproval(threadID, target string) {
+	approveID := fmt.Sprintf("approval:approve:%d", time.Now().UnixNano())
+	denyID := fmt.Sprintf("approval:deny:%d", time.Now().UnixNano())
+	msg, err := w.discord.SendComponents(threadID, "⚠️ **Permission required**\nApprove this devpass-code action?", []Component{
+		{Type: "button", CustomID: approveID, Label: "Approve", Style: "success"},
+		{Type: "button", CustomID: denyID, Label: "Deny", Style: "danger"},
+	})
+	if err != nil {
+		log.Printf("mirror: post approval: %v", err)
+		return
+	}
+	entry := pendingInteraction{target: target, threadID: threadID, messageID: msg.ID, kind: "approval"}
+	w.pendingInteractions.put(approveID, entry)
+	w.pendingInteractions.put(denyID, entry)
+	go func() {
+		timer := time.NewTimer(w.cfg.ApprovalTimeout)
+		defer timer.Stop()
+		select {
+		case <-w.runCtx.Done():
+			return
+		case <-timer.C:
+			if _, ok := w.pendingInteractions.take(approveID); !ok {
+				return
+			}
+			w.pendingInteractions.take(denyID)
+			if err := tmuxctl.SendRecipe(target, tmuxctl.ApprovalDenyRecipe); err != nil {
+				log.Printf("mirror: approval timeout deny: %v", err)
+				return
+			}
+			if err := w.discord.EditComponents(threadID, msg.ID, "⚠️ **Permission denied automatically** (approval timeout).", nil); err != nil {
+				log.Printf("mirror: edit timed-out approval: %v", err)
+			}
+		}
+	}()
+}
+
+func (w *Watcher) postQuestion(threadID, target string, q questionPicker) {
+	id := fmt.Sprintf("question:select:%d", time.Now().UnixNano())
+	options := make([]ComponentOption, 0, len(q.options))
+	for i, option := range q.options {
+		options = append(options, ComponentOption{Label: option, Value: fmt.Sprintf("%d", i)})
+	}
+	msg, err := w.discord.SendComponents(threadID, "❓ **Question:** "+q.prompt, []Component{{
+		Type: "select", CustomID: id, Placeholder: "Choose an answer", Options: options,
+	}})
+	if err != nil {
+		log.Printf("mirror: post question picker: %v", err)
+		return
+	}
+	w.pendingInteractions.put(id, pendingInteraction{target: target, threadID: threadID, messageID: msg.ID, kind: "question", options: len(q.options)})
+}
+
+func (w *Watcher) handleInteraction(ev InteractionEvent) {
+	if !inject.ShouldAcceptAuthor(ev.AuthorID, ev.IsBot, w.cfg.AllowedUserID) {
+		return
+	}
+	entry, ok := w.pendingInteractions.take(ev.CustomID)
+	if !ok || entry.threadID != ev.ChannelID {
+		return
+	}
+	switch entry.kind {
+	case "approval":
+		if strings.Contains(ev.CustomID, ":approve:") {
+			if err := tmuxctl.SendRecipe(entry.target, tmuxctl.ApprovalApproveRecipe); err != nil {
+				log.Printf("mirror: approve recipe: %v", err)
+				return
+			}
+			w.pendingInteractions.take(strings.Replace(ev.CustomID, ":approve:", ":deny:", 1))
+			_ = w.discord.EditComponents(entry.threadID, entry.messageID, "✅ **Permission approved**.", nil)
+			return
+		}
+		if err := tmuxctl.SendRecipe(entry.target, tmuxctl.ApprovalDenyRecipe); err != nil {
+			log.Printf("mirror: deny recipe: %v", err)
+			return
+		}
+		w.pendingInteractions.take(strings.Replace(ev.CustomID, ":deny:", ":approve:", 1))
+		_ = w.discord.EditComponents(entry.threadID, entry.messageID, "⛔ **Permission denied**.", nil)
+	case "question":
+		if len(ev.Values) != 1 {
+			return
+		}
+		option, err := strconv.Atoi(ev.Values[0])
+		if err != nil || option < 0 || option >= entry.options {
+			return
+		}
+		if err := tmuxctl.SelectQuestion(entry.target, option); err != nil {
+			log.Printf("mirror: question recipe: %v", err)
+			return
+		}
+		_ = w.discord.EditComponents(entry.threadID, entry.messageID, "✅ **Question answered.**", nil)
+	}
 }
 
 // handleDiscordMessage is registered with the Discord client to receive

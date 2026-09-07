@@ -18,7 +18,8 @@
 //     FAKE_DP_SWALLOW_UNTIL_READY=1     — (documented; input is always stdin here)
 //
 // Script format ($FAKE_DP_SCRIPT):
-//   [{"prompt": "ping", "reply": "Pong."}, ...]
+//
+//	[{"prompt": "ping", "reply": "Pong."}, ...]
 //
 // The process stays alive reading stdin for prompts and writing replies
 // to stdout after inserting them into the DB, until EOF or SIGINT.
@@ -176,6 +177,32 @@ func run(args []string) error {
 	fmt.Printf("   ┃  Pl-Interactive · devpass-code %s\n", devpassVersion)
 	fmt.Println("")
 	fmt.Println("> ")
+	if os.Getenv("FAKE_DP_PERMISSION_PROMPT") == "1" {
+		// Test double for the documented pane-only approval prompt. Its response
+		// parser deliberately consumes terminal arrow sequences until Enter.
+		fmt.Println("  △ Permission required")
+		fmt.Println("    # Shell command")
+		fmt.Println("  $ ls")
+		fmt.Println("   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm")
+		if err := consumePickerResponse(os.Stdin); err != nil {
+			return err
+		}
+		fmt.Println("Permission denied")
+		fmt.Println("> ")
+	}
+	if os.Getenv("FAKE_DP_QUESTION_PICKER") == "1" {
+		// The real 1.18.11 TUI did not offer this picker; this is a fake-only
+		// contract for exercising the relay's menu transport.
+		fmt.Println("? Choose a fruit")
+		fmt.Println("> apple")
+		fmt.Println("  pear")
+		fmt.Println("enter to confirm")
+		if err := consumePickerResponse(os.Stdin); err != nil {
+			return err
+		}
+		fmt.Println("Question answered")
+		fmt.Println("> ")
+	}
 
 	// Load script if provided
 	var script []scriptTurn
@@ -250,6 +277,22 @@ func run(args []string) error {
 	}
 
 	return nil
+}
+
+// consumePickerResponse waits for the final Enter from a tmux key recipe. The
+// value itself is unimportant to the fake; the relay tests need it to keep the
+// pane occupied until its pinned recipe is sent.
+func consumePickerResponse(in *os.File) error {
+	reader := bufio.NewReader(in)
+	for {
+		b, err := reader.ReadByte()
+		if err != nil {
+			return err
+		}
+		if b == '\n' || b == '\r' {
+			return nil
+		}
+	}
 }
 
 func resolveDBPath() (string, error) {

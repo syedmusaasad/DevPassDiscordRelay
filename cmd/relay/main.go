@@ -14,6 +14,7 @@
 //	RELAY_DEVPASS_DB    Path to opencode.db (default: $XDG_DATA_HOME/devpass-code/opencode.db)
 //	RELAY_STATE_DIR     State dir (default: ~/.devpass-discord-relay)
 //	DISCORD_API_URL     Override Discord API URL (for testing)
+//	APPROVAL_TIMEOUT_SECONDS  Auto-deny timeout for pane permission prompts (default 300)
 package main
 
 import (
@@ -98,6 +99,11 @@ func runRelay(ctx context.Context) error {
 	if v := os.Getenv("RELAY_SPAWN_BIND_TIMEOUT_MS"); v != "" {
 		if ms, parseErr := strconv.Atoi(v); parseErr == nil && ms > 0 {
 			cfg.SpawnBindTimeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	if v := os.Getenv("APPROVAL_TIMEOUT_SECONDS"); v != "" {
+		if seconds, parseErr := strconv.Atoi(v); parseErr == nil && seconds > 0 {
+			cfg.ApprovalTimeout = time.Duration(seconds) * time.Second
 		}
 	}
 
@@ -210,6 +216,66 @@ func (d *discordAdapter) OnMessage(fn mirror.MessageHandler) {
 		}
 		fn(me)
 	})
+}
+
+func (d *discordAdapter) SendComponents(channelID, content string, components []mirror.Component) (mirror.MsgRef, error) {
+	msg, err := d.s.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{Content: content, Components: discordComponents(components)})
+	if err != nil {
+		return mirror.MsgRef{}, err
+	}
+	return mirror.MsgRef{ID: msg.ID, ChannelID: msg.ChannelID}, nil
+}
+
+func (d *discordAdapter) EditComponents(channelID, messageID, content string, components []mirror.Component) error {
+	edited := discordgo.NewMessageEdit(channelID, messageID).SetContent(content)
+	dc := discordComponents(components)
+	edited.Components = &dc
+	_, err := d.s.ChannelMessageEditComplex(edited)
+	return err
+}
+
+func (d *discordAdapter) OnInteraction(fn mirror.InteractionHandler) {
+	d.s.AddHandler(func(_ *discordgo.Session, ev *discordgo.InteractionCreate) {
+		if ev == nil || ev.Type != discordgo.InteractionMessageComponent {
+			return
+		}
+		data := ev.MessageComponentData()
+		interaction := mirror.InteractionEvent{ChannelID: ev.ChannelID, CustomID: data.CustomID, Values: data.Values}
+		if ev.Member != nil && ev.Member.User != nil {
+			interaction.AuthorID = ev.Member.User.ID
+			interaction.IsBot = ev.Member.User.Bot
+		} else if ev.User != nil {
+			interaction.AuthorID = ev.User.ID
+			interaction.IsBot = ev.User.Bot
+		}
+		fn(interaction)
+	})
+}
+
+func discordComponents(components []mirror.Component) []discordgo.MessageComponent {
+	if len(components) == 0 {
+		return []discordgo.MessageComponent{}
+	}
+	row := discordgo.ActionsRow{}
+	for _, component := range components {
+		switch component.Type {
+		case "button":
+			style := discordgo.PrimaryButton
+			if component.Style == "success" {
+				style = discordgo.SuccessButton
+			} else if component.Style == "danger" {
+				style = discordgo.DangerButton
+			}
+			row.Components = append(row.Components, discordgo.Button{CustomID: component.CustomID, Label: component.Label, Style: style})
+		case "select":
+			options := make([]discordgo.SelectMenuOption, 0, len(component.Options))
+			for _, option := range component.Options {
+				options = append(options, discordgo.SelectMenuOption{Label: option.Label, Value: option.Value})
+			}
+			row.Components = append(row.Components, discordgo.SelectMenu{CustomID: component.CustomID, Placeholder: component.Placeholder, Options: options, MaxValues: 1})
+		}
+	}
+	return []discordgo.MessageComponent{row}
 }
 
 // ── Config helpers ─────────────────────────────────────────────────────────────
