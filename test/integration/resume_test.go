@@ -319,7 +319,7 @@ if [ "$count" -eq 1 ]; then
   # Use sh -c to add a trailing sleep so the pane text is visible for detection.
   if ! tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 \
     sh -c "env XDG_DATA_HOME=\"$XDG_HOME\" RELAY_DEVPASS_DB=\"$DB_PATH\" \
-      FAKE_DP_REFUSE_FIRST_RESUME=1 \"$FAKEBIN\" --session \"$SESSION_ID\"; sleep 2"; then
+      FAKE_DP_REFUSE_FIRST_RESUME=1 \"$FAKEBIN\" --session \"$SESSION_ID\" 2>&1; sleep 2"; then
     echo "fake-dpmux-resume: tmux new-session (attempt 1) failed" >&2
     exit 1
   fi

@@ -555,3 +555,43 @@ status 0
 $ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
 status 0
 ```
+
+### Current retry checkpoint (2026-09-07)
+
+The review findings and phase-16 binding evidence were re-read before this
+checkpoint. The checked-in implementation uses only the per-pane stderr
+creation record for new-session identity, and both production client
+constructors set `ShouldRetryOnRateLimit=false`.
+
+The first standalone isolated-resume execution exposed a test-fixture race:
+the intentional fake CLI refusal was written to stderr, while the production
+refusal detector correctly reads the visible tmux pane. The fixture now routes
+only that intentional child-process diagnostic to its pane (`2>&1`); its tmux
+launch itself remains unguarded and still fails visibly/non-zero.
+
+After rebuilding the Docker image, the following commands exited 0:
+
+```
+$ make test
+PASS
+ok   github.com/devpass/devpass-discord-relay/test/integration 43.359s
+
+$ make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+
+$ make integration T=TestInvariant1_ConcurrentForeignSessionRejected > /tmp/p15-c.log 2>&1; grep -q -- '--- PASS: TestInvariant1_ConcurrentForeignSessionRejected' /tmp/p15-c.log && ! grep -q 'no tests to run' /tmp/p15-c.log
+status 0
+
+$ make integration T=TestInvariant1_MissingIdentityFailsClosed > /tmp/p15-m.log 2>&1; grep -q -- '--- PASS: TestInvariant1_MissingIdentityFailsClosed' /tmp/p15-m.log && ! grep -q 'no tests to run' /tmp/p15-m.log
+status 0
+
+$ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
+status 0
+```
+
+The isolated resume test used a fresh Docker container and private
+`TMUX_TMPDIR` for each invocation; each pass made exactly two exact-id resume
+launches and injected the queued prompt once. No ownership or test blocker
+remains. The five-run uncached isolation matrix remains the agreed phase-18
+follow-up.
