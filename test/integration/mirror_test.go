@@ -107,7 +107,7 @@ func TestInvariant2_FirstSightReplay(t *testing.T) {
 	// Set the marker mtime to 5s before the session creation time
 	var sessionCreatedAt int64
 	db.QueryRow(`SELECT time_created FROM session WHERE id = ?`, sessionID).Scan(&sessionCreatedAt)
-	if err := os.WriteFile(pendingPath, []byte(tmuxTarget), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(tmuxTarget, sessionID), 0644); err != nil {
 		t.Fatalf("write pending marker: %v", err)
 	}
 	// Set mtime to match session creation so the relay pairs them
@@ -221,7 +221,7 @@ func TestMirror_EmbedFlip(t *testing.T) {
 	sessionName := "dp-test-embedflip"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	markerTime := time.UnixMilli(now - 500)
-	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(sessionName+":0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(pendingPath, markerTime, markerTime)
@@ -282,7 +282,7 @@ func TestMirror_NoOutputLine(t *testing.T) {
 	sessionName := "dp-test-noout"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	markerTime := time.UnixMilli(now - 500)
-	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(sessionName+":0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(pendingPath, markerTime, markerTime)
@@ -343,7 +343,7 @@ func TestMirror_ToolErrorSoftening(t *testing.T) {
 	sessionName := "dp-test-toolerr"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	markerTime := time.UnixMilli(now - 500)
-	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(sessionName+":0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(pendingPath, markerTime, markerTime)
@@ -423,7 +423,7 @@ func TestMirror_LongTextChunksToFollowups(t *testing.T) {
 	sessionName := "dp-test-longtext"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	markerTime := time.UnixMilli(now - 500)
-	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(sessionName+":0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(pendingPath, markerTime, markerTime)
@@ -523,7 +523,7 @@ func TestMirror_ToolErrorSoftenedOnCleanEnd(t *testing.T) {
 	sessionName := "dp-test-toolsoft"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	markerTime := time.UnixMilli(now - 500)
-	if err := os.WriteFile(pendingPath, []byte(sessionName+":0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(sessionName+":0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(pendingPath, markerTime, markerTime)

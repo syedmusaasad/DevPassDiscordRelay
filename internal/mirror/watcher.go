@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -142,8 +141,8 @@ func (s *suppressedEchoStore) has(sessionID, prompt string) bool {
 
 // claimSet is a thread-safe set of claimed session IDs.
 type claimSet struct {
-	mu   sync.Mutex
-	ids  map[string]bool
+	mu  sync.Mutex
+	ids map[string]bool
 }
 
 func (c *claimSet) init() {
@@ -276,7 +275,7 @@ func (w *Watcher) scanSessions(ctx context.Context, seen map[string]bool) {
 			continue
 		}
 		// Try to pair with a pending marker
-		target, pendingPath, ok := findPendingMarker(w.cfg.StateDir, s.id, s.created, s.title)
+		target, pendingPath, ok := findPendingMarker(w.cfg.StateDir, s.id, s.created)
 		if !ok {
 			// Unmatched session – ignore per spec
 			continue
@@ -313,6 +312,10 @@ type spawnMarkerJSON struct {
 	Nonce        string `json:"nonce"` // legacy; not used to prove identity
 	SpawnInstant int64  `json:"spawnInstant"`
 	StderrLog    string `json:"stderrLog"`
+	// SessionID is set only for an exact-id resume.  A resume has no new
+	// session-creation event to log, so its requested historical id is the
+	// identity evidence; it must never be matched to a newly discovered row.
+	SessionID string `json:"sessionID,omitempty"`
 }
 
 // findPendingMarker looks for a pending-<name> marker file in stateDir that
@@ -324,13 +327,11 @@ type spawnMarkerJSON struct {
 // session must have been created at or after the marker's spawnInstant.
 // Neither the legacy nonce/title field nor any other heuristic is accepted as
 // proof for these markers; a JSON marker with no StderrLog cannot be matched.
-//
-// Legacy plain-text markers (non-JSON; written directly by older tests) are
-// accepted only when the session was created strictly after the marker was
-// written (no grace period, no backwards allowance) to avoid binding stale
-// rows. This scaffold is retained only for pre-existing tests that write
-// markers directly; it is never how the real, installed CLI is bound.
-func findPendingMarker(stateDir string, sessionID string, createdAt int64, sessionTitle string) (target, pendingPath string, ok bool) {
+// Exact-id resume markers bind only their requested historical SessionID. New
+// spawn markers bind only the id in their exclusive stderr log. Plain-text
+// markers retain only the legacy pre-existing-session attachment behavior;
+// they cannot bind a row created after the marker (the unsafe fallback).
+func findPendingMarker(stateDir string, sessionID string, createdAt int64) (target, pendingPath string, ok bool) {
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
 		return "", "", false
@@ -347,32 +348,48 @@ func findPendingMarker(stateDir string, sessionID string, createdAt int64, sessi
 
 		// Try parsing as JSON.
 		var m spawnMarkerJSON
-		if jsonErr := json.Unmarshal(data, &m); jsonErr == nil && (m.StderrLog != "" || m.Nonce != "") {
-			// Session must have been created at or after the spawn instant.
-			if createdAt < m.SpawnInstant {
-				continue
+		if jsonErr := json.Unmarshal(data, &m); jsonErr != nil || m.Target == "" {
+			legacyTarget := strings.TrimSpace(string(data))
+			info, infoErr := e.Info()
+			// Compatibility only for sessions that predate a plain marker (the
+			// historic attachment fixture). This deliberately excludes every
+			// post-marker/new-spawn row, so a timestamp is never used to claim a
+			// newly created foreign transcript.
+			if legacyTarget != "" && infoErr == nil && createdAt <= info.ModTime().UnixMilli() && isTmuxPaneAlive(legacyTarget) {
+				return legacyTarget, fp, true
 			}
-			if m.StderrLog == "" {
-				// No identity evidence source on this marker; cannot prove
-				// ownership. Do not fall back to title/nonce matching.
-				continue
-			}
-			loggedID, logOK := extractCreatedSessionID(m.StderrLog)
-			if !logOK || loggedID != sessionID {
-				continue
-			}
-			return m.Target, fp, true
-		}
-
-		// Legacy plain-text marker: target is the raw content.
-		// Accept only if session was created strictly after the marker was written.
-		info, err := e.Info()
-		if err != nil {
 			continue
 		}
-		markerTimeMS := info.ModTime().UnixMilli()
-		if createdAt >= markerTimeMS {
-			return strings.TrimSpace(string(data)), fp, true
+		if m.SessionID != "" {
+			// A resumed CLI is invoked with this exact id and does not create a
+			// new row, so timestamps and pane liveness are deliberately irrelevant
+			// here. This preserves a known historical session whose old pane died:
+			// it is attached by exact identity and then resumed, never inferred
+			// from any arbitrary post-spawn row.
+			if m.SessionID == sessionID {
+				// A pending historical session may intentionally point at a
+				// dead pane so the inbound path can resume it. Markers written
+				// by dpmux carry a creation-time StderrLog; ad-hoc legacy
+				// markers do not, so retain their dead-target resume behavior.
+				if m.StderrLog == "" || isTmuxPaneAlive(m.Target) {
+					return m.Target, fp, true
+				}
+			}
+			continue
+		}
+		// Liveness is a constraint on verified new-spawn identity, not a
+		// substitute for it. Check it immediately before returning the marker
+		// for a claim so a pane that died while the DB was polled cannot attach
+		// a foreign row.
+		if !isTmuxPaneAlive(m.Target) {
+			continue
+		}
+		if createdAt < m.SpawnInstant || m.StderrLog == "" {
+			continue
+		}
+		loggedID, logOK := extractCreatedSessionID(m.StderrLog)
+		if logOK && loggedID == sessionID {
+			return m.Target, fp, true
 		}
 	}
 	return "", "", false
@@ -527,33 +544,32 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 			case PartKindPreamble:
 				// Skip preamble parts – do NOT count as user prompts
 
-		case PartKindText:
-			if ms.role == "user" && !ms.isPreamble && !ms.promptEchoed {
-				// Echo user prompt (truncated to 300 chars)
-				prompt := cp.Text
-				runes := []rune(prompt)
-				if len(runes) > 300 {
-					prompt = string(runes[:297]) + "..."
-				}
-				if prompt != "" {
-					ms.promptEchoed = true
-					// Suppress duplicate echo: if injectAndVerify already echoed this
-					// prompt (because it had to retry the injection), skip the second
-					// Discord post.  Use the raw cp.Text for the suppression key (before
-					// truncation) so the check is length-invariant.
-					if !w.suppressedEchoes.has(sessionID, cp.Text) {
-						w.sendToThread(threadID, fmt.Sprintf("**You:** %s", prompt))
-					} else {
-						log.Printf("mirror: suppressed duplicate echo for session %s", sessionID)
+			case PartKindText:
+				if ms.role == "user" && !ms.isPreamble && !ms.promptEchoed {
+					// Echo user prompt (truncated to 300 chars)
+					prompt := cp.Text
+					runes := []rune(prompt)
+					if len(runes) > 300 {
+						prompt = string(runes[:297]) + "..."
 					}
+					if prompt != "" {
+						ms.promptEchoed = true
+						// Suppress duplicate echo: if injectAndVerify already echoed this
+						// prompt (because it had to retry the injection), skip the second
+						// Discord post.  Use the raw cp.Text for the suppression key (before
+						// truncation) so the check is length-invariant.
+						if !w.suppressedEchoes.has(sessionID, cp.Text) {
+							w.sendToThread(threadID, fmt.Sprintf("**You:** %s", prompt))
+						} else {
+							log.Printf("mirror: suppressed duplicate echo for session %s", sessionID)
+						}
+					}
+				} else if ms.role == "assistant" {
+					// Accumulate and stream assistant text
+					ms.text += cp.Text
+					ms.hadOutput = true
+					w.updateTextMessage(threadID, ms)
 				}
-			} else if ms.role == "assistant" {
-				// Accumulate and stream assistant text
-				ms.text += cp.Text
-				ms.hadOutput = true
-				w.updateTextMessage(threadID, ms)
-			}
-
 
 			case PartKindToolCall:
 				if ms.role == "assistant" {
@@ -639,7 +655,7 @@ func (w *Watcher) updateTextMessage(threadID string, ms *msgState) {
 	}
 
 	N := len(ms.discordMsgIDs) // Discord messages already created
-	K := len(chunks)            // chunks needed now
+	K := len(chunks)           // chunks needed now
 
 	if N == 0 {
 		// First call: create the first Discord message.
@@ -949,8 +965,8 @@ const echoVerifyTimeout = 30 * time.Second
 
 // pendingResumeStore tracks pending !resume <n> candidate lists per Discord thread.
 type pendingResumeStore struct {
-	mu       sync.Mutex
-	entries  map[string]*pendingResumeEntry // keyed by threadID
+	mu      sync.Mutex
+	entries map[string]*pendingResumeEntry // keyed by threadID
 }
 
 type pendingResumeEntry struct {
@@ -961,9 +977,9 @@ type pendingResumeEntry struct {
 }
 
 type resumeCandidate struct {
-	SessionID   string
-	ProviderID  string // model provider info if available
-	LastActive  int64  // time_updated from DB (ms)
+	SessionID  string
+	ProviderID string // model provider info if available
+	LastActive int64  // time_updated from DB (ms)
 }
 
 func (p *pendingResumeStore) init() {
@@ -1455,95 +1471,6 @@ func (w *Watcher) handleResumeChoiceForThread(threadID, content string) bool {
 		}
 	}()
 	return true
-}
-
-// ─── Pane-PID session binding ────────────────────────────────────────────────
-
-// panePidFromTmux returns the PID of the foreground process in the tmux pane
-// identified by target, using "tmux display-message -p -t <target> #{pane_pid}".
-// Returns 0 and an error if the query fails.
-func panePidFromTmux(target string) (int, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", target, "#{pane_pid}").Output()
-	if err != nil {
-		return 0, fmt.Errorf("tmux display-message pane_pid: %w", err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("invalid pane_pid %q", strings.TrimSpace(string(out)))
-	}
-	return pid, nil
-}
-
-// procExists returns true if /proc/<pid> exists, meaning the process was alive
-// when the check ran (or its pid slot is still in /proc after exit).
-func procExists(pid int) bool {
-	_, err := os.Stat(fmt.Sprintf("/proc/%d", pid))
-	return err == nil
-}
-
-// BindSessionByPanePid is the exported, injectable form of bindSessionByPanePid.
-// It is used in unit tests to supply fake pane-pid and proc-exists functions.
-//
-// panePidFn: returns the PID of the tmux pane's foreground process.
-// procExistsFn: returns true if /proc/<pid> exists (process is alive).
-//
-// It polls db for the first session row with parent_id IS NULL and
-// time_created >= spawnInstant within timeout. If panePidFn succeeds and
-// procExistsFn confirms the process is alive, it returns the session id.
-//
-// Stale rows created before spawnInstant are never accepted.
-func BindSessionByPanePid(
-	ctx context.Context,
-	db *sql.DB,
-	tmuxTarget string,
-	spawnInstant int64,
-	timeout time.Duration,
-	panePidFn func(target string) (int, error),
-	procExistsFn func(pid int) bool,
-) (string, bool) {
-	return bindSessionByPanePid(ctx, db, tmuxTarget, spawnInstant, timeout, panePidFn, procExistsFn)
-}
-
-// bindSessionByPanePid implements the pane-pid ownership check.
-// It verifies the pane is alive (via panePidFn + procExistsFn) and then
-// accepts the first session row with time_created >= spawnInstant.
-func bindSessionByPanePid(
-	ctx context.Context,
-	db *sql.DB,
-	tmuxTarget string,
-	spawnInstant int64,
-	timeout time.Duration,
-	panePidFn func(target string) (int, error),
-	procExistsFn func(pid int) bool,
-) (string, bool) {
-	// Verify the pane is alive: get pane_pid and check /proc.
-	pid, pidErr := panePidFn(tmuxTarget)
-	if pidErr != nil || pid <= 0 {
-		return "", false
-	}
-	if !procExistsFn(pid) {
-		return "", false
-	}
-
-	// Poll for the first session row with time_created >= spawnInstant.
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return "", false
-		default:
-		}
-		var sid string
-		err := db.QueryRowContext(ctx,
-			`SELECT id FROM session WHERE parent_id IS NULL AND time_created >= ? ORDER BY time_created ASC LIMIT 1`,
-			spawnInstant,
-		).Scan(&sid)
-		if err == nil && sid != "" {
-			return sid, true
-		}
-		time.Sleep(300 * time.Millisecond)
-	}
-	return "", false
 }
 
 // ─── Stderr-log session identity binding (production mechanism) ────────────

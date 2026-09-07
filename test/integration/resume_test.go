@@ -87,7 +87,7 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 
 	// Write pending marker.
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
-	if err := os.WriteFile(pendingPath, []byte(paneTarget), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(paneTarget, sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	markerTime := time.UnixMilli(now - 1000)
@@ -245,7 +245,8 @@ func TestInvariant4_ResumeRefusalRetry(t *testing.T) {
 	sessionName := "dp-refusal-test"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
 	deadTarget := sessionName + ":0.0"
-	if err := os.WriteFile(pendingPath, []byte(deadTarget), 0644); err != nil {
+	marker := fmt.Sprintf(`{"target":%q,"sessionID":%q}`, deadTarget, sessionID)
+	if err := os.WriteFile(pendingPath, []byte(marker), 0644); err != nil {
 		t.Fatal(err)
 	}
 	markerTime := time.UnixMilli(now - 500)
@@ -297,10 +298,6 @@ printf '%s' "$count" > "$COUNT_FILE"
 SESSION_NAME="dp-resume-retry-${count}-$$"
 TMUX_TARGET="${SESSION_NAME}:0.0"
 
-# Write the pending marker before spawning (spec contract).
-mkdir -p "$STATE_DIR"
-echo "$TMUX_TARGET" > "${STATE_DIR}/pending-${SESSION_NAME}"
-
 # Parse --session <id> from args
 SESSION_ID=""
 while [ $# -gt 0 ]; do
@@ -309,6 +306,13 @@ while [ $# -gt 0 ]; do
     *) shift ;;
   esac
 done
+
+# Write the pending marker before spawning (spec contract). A resume has an
+# exact historical identity, so it records that id rather than relying on a
+# timestamp or a new-session stderr creation event (which a real resume does
+# not emit).
+mkdir -p "$STATE_DIR"
+printf '{"target":"%s","sessionID":"%s"}\n' "$TMUX_TARGET" "$SESSION_ID" > "${STATE_DIR}/pending-${SESSION_NAME}"
 
 if [ "$count" -eq 1 ]; then
   # First call: refuse (FAKE_DP_REFUSE_FIRST_RESUME=1).
@@ -420,11 +424,16 @@ echo "$SESSION_NAME"
 	}
 	t.Log("✓ Invariant 4a: resume refusal detected, retried, prompt injected successfully")
 
-	// Verify dpmux was called at least twice.
-	if countData, err := os.ReadFile(callCountFile); err == nil {
-		count := strings.TrimSpace(string(countData))
-		t.Logf("dpmux call count: %s (expected ≥2)", count)
+	// Exactly the refusing launch and one successful exact-id retry are allowed.
+	countData, err := os.ReadFile(callCountFile)
+	if err != nil {
+		t.Fatalf("read dpmux call count: %v", err)
 	}
+	count := strings.TrimSpace(string(countData))
+	if count != "2" {
+		t.Fatalf("expected exactly 2 resume launches (refusal + retry), got %q", count)
+	}
+	t.Logf("dpmux call count: %s (expected exactly 2)", count)
 }
 
 // ── TestInvariant4_AmbiguousIdCandidateList ───────────────────────────────────
@@ -676,5 +685,3 @@ func envWithoutTmux() []string {
 	out = append(out, "TMUX=")
 	return out
 }
-
-

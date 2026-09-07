@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -284,154 +285,75 @@ func TestDetectRefusal_ForeignIDNoPaneText(t *testing.T) {
 	}
 }
 
-// ── Pane-PID session binding tests ───────────────────────────────────────────
+// ── Verified stderr-log binding tests ────────────────────────────────────────
 
-// TestBindSessionByPanePid_NoPaneNoMatch verifies that when the pane-pid lookup
-// fails (dead pane), bindSessionByPanePid returns ("", false).
-func TestBindSessionByPanePid_NoPaneNoMatch(t *testing.T) {
-	db := testDB(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	// panePidFn always fails — simulates a dead pane.
-	fakePanePid := func(target string) (int, error) {
-		return 0, fmt.Errorf("no server running")
+func writeCreationEvidence(t *testing.T, id string) string {
+	t.Helper()
+	path := t.TempDir() + "/stderr.log"
+	if err := os.WriteFile(path, []byte("time=x level=INFO service=session message=created id="+id+"\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	fakeProcExists := func(pid int) bool { return true }
+	return path
+}
 
-	sid, ok := BindSessionByPanePid(
-		ctx, db, "dead-session:0.0", time.Now().UnixMilli(),
-		500*time.Millisecond, fakePanePid, fakeProcExists,
-	)
+func TestBindSessionByStderrLog_NoPaneNoMatch(t *testing.T) {
+	db := testDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	sid, ok := BindSessionByStderrLog(ctx, db, writeCreationEvidence(t, "ses_dead_001"), "dead:0.0", time.Now().UnixMilli(), 100*time.Millisecond, func(string) bool { return false })
 	if ok || sid != "" {
 		t.Errorf("expected no binding for dead pane, got sid=%q ok=%v", sid, ok)
 	}
-	t.Log("✓ dead pane → no binding")
 }
 
-// TestBindSessionByPanePid_StaleRowLoses verifies that a session row created
-// BEFORE spawnInstant is never accepted, even when pane_pid is valid.
-// This is the "stale-row (created after relay start, before spawn, id sorts first)"
-// case required by the brief.
-func TestBindSessionByPanePid_StaleRowLoses(t *testing.T) {
+// Preserve the stale-row guard: even genuine evidence is rejected when its DB
+// row predates this launch's marker instant.
+func TestBindSessionByStderrLog_StaleRowLoses(t *testing.T) {
 	db := testDB(t)
-
-	// Insert a stale session row (created 1 second BEFORE spawnInstant).
 	spawnInstant := time.Now().UnixMilli()
 	staleTime := spawnInstant - 1000
-
-	_, err := db.Exec(
-		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		"ses_stale_001", "proj-test", "slug-stale", "/tmp", "stale session", "1.0", staleTime, staleTime,
-	)
-	if err != nil {
-		t.Fatalf("insert stale session: %v", err)
+	if _, err := db.Exec(`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated) VALUES(?,?,?,?,?,?,?,?)`, "ses_stale_001", "proj-test", "slug", "/tmp", "stale", "1.0", staleTime, staleTime); err != nil {
+		t.Fatal(err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-
-	// Pane is "alive" — pid lookup succeeds.
-	fakePid := 99999
-	fakePanePid := func(target string) (int, error) { return fakePid, nil }
-	fakeProcExists := func(pid int) bool { return pid == fakePid }
-
-	// spawnInstant is NOW, so the stale row (1 s before) must not be returned.
-	sid, ok := BindSessionByPanePid(
-		ctx, db, "live-session:0.0", spawnInstant,
-		500*time.Millisecond, fakePanePid, fakeProcExists,
-	)
+	sid, ok := BindSessionByStderrLog(ctx, db, writeCreationEvidence(t, "ses_stale_001"), "live:0.0", spawnInstant, 100*time.Millisecond, func(string) bool { return true })
 	if ok || sid != "" {
 		t.Errorf("expected stale row to lose, got sid=%q ok=%v", sid, ok)
 	}
-	t.Log("✓ stale row (before spawnInstant) loses even with valid pane pid")
 }
 
-// TestBindSessionByPanePid_FreshRowWins verifies that a session row created AT
-// spawnInstant is accepted when the pane_pid is valid and /proc confirms liveness.
-// No nonce is used — binding relies entirely on pane-pid + row time.
-func TestBindSessionByPanePid_FreshRowWins(t *testing.T) {
+func TestBindSessionByStderrLog_FreshRowWins(t *testing.T) {
 	db := testDB(t)
-
 	spawnInstant := time.Now().UnixMilli()
-	freshTime := spawnInstant // created at exactly spawnInstant
-
-	_, err := db.Exec(
-		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		"ses_fresh_001", "proj-test", "slug-fresh", "/tmp", "fresh session", "1.0", freshTime, freshTime,
-	)
-	if err != nil {
-		t.Fatalf("insert fresh session: %v", err)
+	if _, err := db.Exec(`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated) VALUES(?,?,?,?,?,?,?,?)`, "ses_fresh_001", "proj-test", "slug", "/tmp", "fresh", "1.0", spawnInstant, spawnInstant); err != nil {
+		t.Fatal(err)
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-
-	fakePid := 99998
-	fakePanePid := func(target string) (int, error) { return fakePid, nil }
-	fakeProcExists := func(pid int) bool { return pid == fakePid }
-
-	sid, ok := BindSessionByPanePid(
-		ctx, db, "live-session:0.0", spawnInstant,
-		2*time.Second, fakePanePid, fakeProcExists,
-	)
+	sid, ok := BindSessionByStderrLog(ctx, db, writeCreationEvidence(t, "ses_fresh_001"), "live:0.0", spawnInstant, time.Second, func(string) bool { return true })
 	if !ok || sid != "ses_fresh_001" {
-		t.Errorf("expected ses_fresh_001 to be bound, got sid=%q ok=%v", sid, ok)
+		t.Errorf("expected verified fresh session, got sid=%q ok=%v", sid, ok)
 	}
-	t.Logf("✓ fresh row (time_created >= spawnInstant) wins with valid pane pid: bound=%s", sid)
 }
 
-// TestBindSessionByPanePid_StaleBeforeFreshWins verifies the key anti-ambiguity
-// guarantee: when a stale row (id sorts first lexicographically) exists alongside
-// a fresh row, only the fresh row is returned. The stale row must never win.
-func TestBindSessionByPanePid_StaleBeforeFreshWins(t *testing.T) {
+// A stale id that sorts first cannot win when the exclusive stderr evidence
+// names the actual new session.
+func TestBindSessionByStderrLog_StaleBeforeFreshWins(t *testing.T) {
 	db := testDB(t)
-
 	spawnInstant := time.Now().UnixMilli()
-	staleTime := spawnInstant - 2000
-	freshTime := spawnInstant
-
-	// Stale row: id "aaa_" sorts before "ses_" lexicographically.
-	_, err := db.Exec(
-		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		"aaa_stale_sorts_first", "proj-test", "slug-s", "/tmp", "stale", "1.0", staleTime, staleTime,
-	)
-	if err != nil {
-		t.Fatalf("insert stale: %v", err)
+	for _, row := range []struct {
+		id string
+		at int64
+	}{{"aaa_stale_sorts_first", spawnInstant - 2000}, {"ses_fresh_002", spawnInstant}} {
+		if _, err := db.Exec(`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated) VALUES(?,?,?,?,?,?,?,?)`, row.id, "proj-test", "slug", "/tmp", "session", "1.0", row.at, row.at); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	_, err = db.Exec(
-		`INSERT INTO session(id,project_id,slug,directory,title,version,time_created,time_updated)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		"ses_fresh_002", "proj-test", "slug-f", "/tmp", "fresh", "1.0", freshTime, freshTime,
-	)
-	if err != nil {
-		t.Fatalf("insert fresh: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-
-	fakePid := 99997
-	fakePanePid := func(target string) (int, error) { return fakePid, nil }
-	fakeProcExists := func(pid int) bool { return pid == fakePid }
-
-	sid, ok := BindSessionByPanePid(
-		ctx, db, "live-session:0.0", spawnInstant,
-		2*time.Second, fakePanePid, fakeProcExists,
-	)
-	if !ok {
-		t.Fatal("expected a binding, got none")
+	sid, ok := BindSessionByStderrLog(ctx, db, writeCreationEvidence(t, "ses_fresh_002"), "live:0.0", spawnInstant, time.Second, func(string) bool { return true })
+	if !ok || sid != "ses_fresh_002" {
+		t.Errorf("expected verified fresh id, got sid=%q ok=%v", sid, ok)
 	}
-	if sid == "aaa_stale_sorts_first" {
-		t.Errorf("stale row (sorts first) must not win; got sid=%q", sid)
-	}
-	if sid != "ses_fresh_002" {
-		t.Errorf("expected ses_fresh_002, got %q", sid)
-	}
-	t.Logf("✓ stale-before-fresh: stale row loses, fresh row wins: bound=%s", sid)
 }

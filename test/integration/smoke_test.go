@@ -31,6 +31,13 @@ func mustBin(t *testing.T, name string) string {
 	return p
 }
 
+// knownSessionMarker is used by historical-session fixtures. Production new
+// spawns use dpmux's stderrLog evidence; these fixtures intentionally model a
+// pre-existing exact ID that may need resume after its pane has died.
+func knownSessionMarker(target, sessionID string) []byte {
+	return []byte(fmt.Sprintf(`{"target":%q,"sessionID":%q}`, target, sessionID))
+}
+
 // TestSmoke_FakeDevpassCodeStartsAndReady verifies:
 //  1. fake-devpass-code starts in a tmux pane
 //  2. The ready signature "Ask anything..." appears in the pane

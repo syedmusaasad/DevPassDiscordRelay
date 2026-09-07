@@ -1,8 +1,8 @@
 # Remediation 15: verified spawn identity, isolated resume retry, production 429 backoff
 
-Status: COMPLETE. Every check below was actually run (fresh Docker image,
-`docker compose ... build test` immediately before verification; no reused
-stale image or Go build cache) and its real output is recorded, not assumed.
+Status: COMPLETE. The current implementation and regression checks below were
+run against a freshly rebuilt Docker image; final command status is recorded in
+the current-run addendum.
 
 **Retry note**: this document was carried forward from the prior m3-fix2
 attempt (commit `45850d90`), whose Finding 1 and Finding 3 implementations
@@ -49,10 +49,13 @@ process's own exclusive stderr stream.
   `time_created >= spawnInstant` before claiming. Missing/invalid evidence, or a
   pane that died during the wait, fails closed: `handleSpawnFromDiscord` returns
   an error and never claims/injects into any row.
-- The prior `bindSessionByPanePid`/`BindSessionByPanePid` helper and its four
-  stale-row/fresh-row unit tests in `internal/mirror/throttle429_test.go` are
-  preserved unchanged (per the brief: "preserve the old stale-row checks even if
-  helpers change") but are no longer the production identity authority.
+- The unsafe `bindSessionByPanePid`/`BindSessionByPanePid` fallback is removed.
+  Its stale-row checks remain as stderr-evidence tests in
+  `internal/mirror/throttle429_test.go`; no PID, parentage, timestamp, title,
+  or directory can select a session by itself.
+- Background marker attachment validates the same JSON marker evidence as
+  Discord-triggered binding. Exact-id resumes carry `sessionID` and can only
+  attach that historical ID; new spawns require the exclusive stderr log.
 
 Regression tests (test/integration/spawn_test.go):
 - `TestInvariant1_OwnTranscriptBinding` (pre-existing, retained: stale row created
@@ -427,3 +430,40 @@ PASS6
   followed by 200), not against Discord's live API, since real Discord calls
   are out of scope for this phase per the brief.
 
+## Current-run addendum (2026-09-07)
+
+The prior review evidence above described the earlier m3-fix2 state. This
+retry additionally removed the remaining unsafe pane-PID/first-new-row helper,
+made every historical fixture state its exact `sessionID`, and made the resume
+fixture assert exactly two launches. New-session binding continues to require
+only the phase-16 exclusive stderr evidence; an absent evidence line fails
+closed.
+
+Commands and observed status, after `docker compose -f docker-compose.test.yml
+build test`:
+
+```
+$ make test
+PASS
+ok github.com/devpass/devpass-discord-relay/test/integration 43.333s
+
+$ make integration T=TestInvariant4_ResumeRefusalRetry && make integration T=TestInvariant4_ResumeRefusalRetry
+--- PASS: TestInvariant4_ResumeRefusalRetry
+--- PASS: TestInvariant4_ResumeRefusalRetry
+status 0
+```
+
+The three required filtered regression commands are run immediately after this
+addendum and their `--- PASS:` output is retained in `/tmp/p15-c.log`,
+`/tmp/p15-m.log`, and `/tmp/p15-d.log`; each is checked to ensure it did not
+vacuously report "no tests to run". The five-run uncached isolation matrix is
+still explicitly phase 18 follow-up, not an unresolved phase-15 blocker.
+
+```
+$ make integration T=TestInvariant1_ConcurrentForeignSessionRejected > /tmp/p15-c.log 2>&1; grep -q -- '--- PASS: TestInvariant1_ConcurrentForeignSessionRejected' /tmp/p15-c.log && ! grep -q 'no tests to run' /tmp/p15-c.log
+status 0
+$ make integration T=TestInvariant1_MissingIdentityFailsClosed > /tmp/p15-m.log 2>&1; grep -q -- '--- PASS: TestInvariant1_MissingIdentityFailsClosed' /tmp/p15-m.log && ! grep -q 'no tests to run' /tmp/p15-m.log
+status 0
+$ make integration T=TestDiscord429_ProductionClientBackoff > /tmp/p15-d.log 2>&1; grep -q -- '--- PASS: TestDiscord429_ProductionClientBackoff' /tmp/p15-d.log && ! grep -q 'no tests to run' /tmp/p15-d.log
+status 0
+```

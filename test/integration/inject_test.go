@@ -82,7 +82,7 @@ func TestInject_ReadinessProbe(t *testing.T) {
 
 	// Write pending marker so relay can pair this session.
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
-	if err := os.WriteFile(pendingPath, []byte(paneTarget), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker(paneTarget, sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	// Marker mtime: just before session creation.
@@ -196,7 +196,7 @@ func TestInject_ForeignAuthorDropped(t *testing.T) {
 	// No active tmux session — inject should never fire.
 	sessionName := "dp-inject-fa"
 	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
-	if err := os.WriteFile(pendingPath, []byte("nonexistent-pane:0.0"), 0644); err != nil {
+	if err := os.WriteFile(pendingPath, knownSessionMarker("nonexistent-pane:0.0", sessionID), 0644); err != nil {
 		t.Fatal(err)
 	}
 	markerTime := time.UnixMilli(now - 1000)

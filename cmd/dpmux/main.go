@@ -105,10 +105,11 @@ func runLS() error {
 // mechanism (see docs/BINDING-PROTOCOL.md); Nonce is retained only for legacy
 // marker-format compatibility and is not used to prove ownership.
 type pendingMarker struct {
-	Target       string `json:"target"`       // tmux target (e.g. "dp-123:0.0")
-	Nonce        string `json:"nonce"`        // legacy; not used for production identity
-	SpawnInstant int64  `json:"spawnInstant"` // time.Now().UnixMilli() when marker was written
-	StderrLog    string `json:"stderrLog"`    // path to this launch's exclusive stderr log file
+	Target       string `json:"target"`              // tmux target (e.g. "dp-123:0.0")
+	Nonce        string `json:"nonce"`               // legacy; not used for production identity
+	SpawnInstant int64  `json:"spawnInstant"`        // time.Now().UnixMilli() when marker was written
+	StderrLog    string `json:"stderrLog"`           // path to this launch's exclusive stderr log file
+	SessionID    string `json:"sessionID,omitempty"` // exact historical ID for a --session resume
 }
 
 // generateNonce returns 16 random hex bytes.
@@ -155,6 +156,7 @@ func runLaunch(args []string) error {
 	if !untrusted {
 		dpArgs = append([]string{"--auto"}, dpArgs...)
 	}
+	resumeSessionID := sessionIDFromArgs(dpArgs)
 
 	// Generate a nonce (legacy marker field only; not used to prove identity).
 	nonce := generateNonce()
@@ -192,6 +194,7 @@ func runLaunch(args []string) error {
 				Nonce:        nonce,
 				SpawnInstant: time.Now().UnixMilli(),
 				StderrLog:    stderrLog,
+				SessionID:    resumeSessionID,
 			}
 			markerJSON, _ := json.Marshal(marker)
 			if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
@@ -225,6 +228,7 @@ func runLaunch(args []string) error {
 		Nonce:        nonce,
 		SpawnInstant: time.Now().UnixMilli(),
 		StderrLog:    stderrLog,
+		SessionID:    resumeSessionID,
 	}
 	markerJSON, _ := json.Marshal(marker)
 	if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
@@ -246,6 +250,18 @@ func runLaunch(args []string) error {
 	fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
 	fmt.Println(sessionName)
 	return nil
+}
+
+// sessionIDFromArgs returns the exact historical id requested by a resume.
+// Unlike a new spawn, a resume does not create a session row or emit the
+// creation log, so the explicit --session identity is retained in the marker.
+func sessionIDFromArgs(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--session" || args[i] == "-s" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // buildDevpassCmd constructs the shell command string for tmux.
