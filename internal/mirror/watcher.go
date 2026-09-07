@@ -53,6 +53,9 @@ type Config struct {
 	// ApprovalTimeout is the maximum time an approval prompt can remain unanswered.
 	// The default is five minutes.
 	ApprovalTimeout time.Duration
+
+	// SessionTTL controls retention for dead sessions.json records (default 30d).
+	SessionTTL time.Duration
 }
 
 // DiscordClient is the interface the watcher uses to talk to Discord.
@@ -261,6 +264,9 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 	if cfg.ApprovalTimeout == 0 {
 		cfg.ApprovalTimeout = 5 * time.Minute
 	}
+	if cfg.SessionTTL == 0 {
+		cfg.SessionTTL = 30 * 24 * time.Hour
+	}
 	sessPath := filepath.Join(cfg.StateDir, "sessions.json")
 	sessions, err := LoadSessions(sessPath)
 	if err != nil {
@@ -274,6 +280,9 @@ func NewWatcher(cfg Config, db *sql.DB, discord DiscordClient) (*Watcher, error)
 		throttle: NewThrottle(5, 5*time.Second),
 		injector: inject.New(cfg.StateDir),
 		runCtx:   context.Background(),
+	}
+	if err := sessions.SweepExpired(cfg.SessionTTL, isTmuxPaneAlive, time.Now()); err != nil {
+		log.Printf("mirror: sessions.json TTL sweep: %v", err)
 	}
 
 	// Register incoming message handler for thread replies.
@@ -310,6 +319,8 @@ func (w *Watcher) Run(ctx context.Context) {
 	w.runCtx = ctx
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
+	ttlTicker := time.NewTicker(24 * time.Hour)
+	defer ttlTicker.Stop()
 	// Track known session IDs to avoid re-pairing
 	seen := make(map[string]bool)
 	// Pre-seed with already-tracked sessions
@@ -325,6 +336,10 @@ func (w *Watcher) Run(ctx context.Context) {
 			// Merge any sessions claimed by handleSpawnFromDiscord into seen.
 			w.claimed.copyInto(seen)
 			w.scanSessions(ctx, seen)
+		case <-ttlTicker.C:
+			if err := w.sessions.SweepExpired(w.cfg.SessionTTL, isTmuxPaneAlive, time.Now()); err != nil {
+				log.Printf("mirror: sessions.json TTL sweep: %v", err)
+			}
 		}
 	}
 }

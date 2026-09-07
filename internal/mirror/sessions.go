@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"time"
 )
 
 // SessionRecord represents a relay session claim in sessions.json.
@@ -15,6 +16,7 @@ type SessionRecord struct {
 	ThreadRootID string `json:"thread_root_id"`
 	ChannelID    string `json:"channel_id"`
 	Status       string `json:"status"` // "active", "ended"
+	UpdatedAt    int64  `json:"updated_at"`
 }
 
 // Sessions is a thread-safe sessions.json store.
@@ -49,7 +51,34 @@ func LoadSessions(path string) (*Sessions, error) {
 func (s *Sessions) Upsert(r *SessionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	r.UpdatedAt = time.Now().UnixMilli()
 	s.records[r.SessionID] = r
+	return s.save()
+}
+
+// SweepExpired removes records older than ttl only after confirming their tmux
+// window is gone. Active windows survive regardless of record age.
+func (s *Sessions) SweepExpired(ttl time.Duration, alive func(string) bool, now time.Time) error {
+	if ttl <= 0 {
+		return nil
+	}
+	cutoff := now.Add(-ttl).UnixMilli()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	changed := false
+	for id, record := range s.records {
+		if record.UpdatedAt == 0 || record.UpdatedAt > cutoff {
+			continue
+		}
+		if record.TmuxTarget != "" && alive(record.TmuxTarget) {
+			continue
+		}
+		delete(s.records, id)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
 	return s.save()
 }
 

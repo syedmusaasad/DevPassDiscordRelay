@@ -36,6 +36,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/devpass/devpass-discord-relay/internal/tmuxctl"
 )
 
 func main() {
@@ -50,15 +52,82 @@ func run(args []string) error {
 	if len(args) == 1 && args[0] == "ls" {
 		return runLS()
 	}
+	if len(args) == 1 && args[0] == "update" {
+		return runUpdate()
+	}
+	if len(args) == 1 && args[0] == "uninstall" {
+		return runUninstall()
+	}
 
 	return runLaunch(args)
+}
+
+func runUpdate() error {
+	root, err := repoRoot()
+	if err != nil {
+		return err
+	}
+	commands := [][]string{{"fetch", "--tags"}, {"checkout", "latest"}, {"pull", "--ff-only", "origin", "latest"}}
+	for _, args := range commands {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		}
+	}
+	cmd := exec.Command("make", "build")
+	cmd.Dir = root
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("rebuild: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "Update complete. Restart with: systemctl --user restart devpass-discord-relay")
+	return nil
+}
+
+func runUninstall() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	configDir := filepath.Join(home, ".config", "devpass-discord-relay")
+	envPath := filepath.Join(configDir, ".env")
+	if data, err := os.ReadFile(envPath); err == nil {
+		backup := envPath + ".uninstall.bak"
+		if err := os.WriteFile(backup, data, 0600); err != nil {
+			return fmt.Errorf("backup .env: %w", err)
+		}
+	}
+	_ = exec.Command("systemctl", "--user", "disable", "--now", "devpass-discord-relay.service").Run()
+	_ = os.Remove(filepath.Join(home, ".config", "systemd", "user", "devpass-discord-relay.service"))
+	_ = os.Remove(filepath.Join(home, ".local", "bin", "relay"))
+	_ = os.Remove(filepath.Join(home, ".local", "bin", "dpmux"))
+	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	fmt.Fprintln(os.Stderr, "Uninstalled; .env backup retained at "+envPath+".uninstall.bak")
+	return nil
+}
+
+func repoRoot() (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("locate repository: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // runLS lists active relay (dp-*) sessions and their windows.
 // Window lines that duplicate their session name are suppressed.
 func runLS() error {
 	// List all sessions, filter to dp-* only.
-	sessOut, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return err
+	}
+	sessOut, err := exec.Command(tmuxBin, "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {
 		// No sessions running is OK.
 		return nil
@@ -79,7 +148,7 @@ func runLS() error {
 	for _, sess := range dpSessions {
 		fmt.Println(sess)
 		// List windows for this session; suppress windows whose name equals the session name.
-		winOut, err := exec.Command("tmux", "list-windows", "-t", sess, "-F", "#{window_name}").Output()
+		winOut, err := exec.Command(tmuxBin, "list-windows", "-t", sess, "-F", "#{window_name}").Output()
 		if err != nil {
 			continue
 		}
@@ -142,6 +211,11 @@ func runLaunch(args []string) error {
 	if err != nil {
 		return err
 	}
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[dpmux] tmux isolation mode: %s\n", tmuxctl.IsolationMode())
 
 	// Build command args for devpass-code
 	dpArgs := []string{}
@@ -202,8 +276,9 @@ func runLaunch(args []string) error {
 			}
 
 			launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce, stderrLog)
-			launchErr := exec.Command("tmux", "new-window", "-t", hostSessionName, "-n", windowName,
-				"-d", launchCmd).Run()
+			launch, _ := tmuxctl.NewBirthCommand(tmuxBin, "new-window", "-t", hostSessionName, "-n", windowName,
+				"-d", launchCmd)
+			launchErr := launch.Run()
 			if launchErr == nil {
 				fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
 				fmt.Println(sessionName)
@@ -240,8 +315,9 @@ func runLaunch(args []string) error {
 	// on the inherited TMUX env var.  When the process is already inside a
 	// non-default tmux server, the TMUX env var would cause "new-session" to
 	// talk to the wrong server; using "-L default" bypasses this.
-	launchErr := exec.Command("tmux", "-L", "default", "new-session", "-d", "-s", sessionName,
-		"-x", "220", "-y", "50", launchCmd).Run()
+	launchCmdExec, _ := tmuxctl.NewBirthCommand(tmuxBin, "-L", "default", "new-session", "-d", "-s", sessionName,
+		"-x", "220", "-y", "50", launchCmd)
+	launchErr := launchCmdExec.Run()
 	if launchErr != nil {
 		os.Remove(pendingPath)
 		return fmt.Errorf("tmux new-session: %w", launchErr)
@@ -361,7 +437,11 @@ func extractHostSessionName() string {
 		return ""
 	}
 	// Ask tmux for the current session name
-	out, err := exec.Command("tmux", "display-message", "-p", "#S").Output()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return ""
+	}
+	out, err := exec.Command(tmuxBin, "display-message", "-p", "#S").Output()
 	if err != nil {
 		return ""
 	}
@@ -371,17 +451,36 @@ func extractHostSessionName() string {
 // resolveDevpassBin finds the devpass-code binary.
 func resolveDevpassBin() (string, error) {
 	if v := os.Getenv("RELAY_DEVPASS_BIN"); v != "" {
+		if err := verifyDevpassBin(v); err != nil {
+			return "", fmt.Errorf("RELAY_DEVPASS_BIN %q: %w", v, err)
+		}
 		return v, nil
+	}
+	if err := verifyDevpassBin("/usr/local/bin/devpass-code"); err == nil {
+		return "/usr/local/bin/devpass-code", nil
 	}
 	p, err := exec.LookPath("devpass-code")
 	if err != nil {
-		// Fall back to fake-devpass-code for tests
-		if fp, err2 := exec.LookPath("fake-devpass-code"); err2 == nil {
-			return fp, nil
-		}
 		return "", fmt.Errorf("devpass-code not found on PATH (set RELAY_DEVPASS_BIN): %w", err)
 	}
+	if err := verifyDevpassBin(p); err != nil {
+		return "", fmt.Errorf("devpass-code %q: %w", p, err)
+	}
 	return p, nil
+}
+
+func verifyDevpassBin(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&0111 == 0 {
+		return fmt.Errorf("not executable")
+	}
+	if err := exec.Command(path, "-V").Run(); err == nil {
+		return nil
+	}
+	return exec.Command(path, "--version").Run()
 }
 
 // resolveStateDir returns the state directory.

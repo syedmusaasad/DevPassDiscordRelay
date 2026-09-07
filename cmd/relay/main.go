@@ -19,9 +19,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -96,6 +98,12 @@ func runRelay(ctx context.Context) error {
 		StateDir:      stateDir,
 		DpmuxBin:      os.Getenv("RELAY_DPMUX_BIN"), // optional override for dpmux binary path
 	}
+	if v := os.Getenv("SESSION_TTL_DAYS"); v != "" {
+		if days, parseErr := strconv.Atoi(v); parseErr == nil && days > 0 {
+			cfg.SessionTTL = time.Duration(days) * 24 * time.Hour
+		}
+	}
+	sendTelemetry(stateDir)
 	if v := os.Getenv("RELAY_SPAWN_BIND_TIMEOUT_MS"); v != "" {
 		if ms, parseErr := strconv.Atoi(v); parseErr == nil && ms > 0 {
 			cfg.SpawnBindTimeout = time.Duration(ms) * time.Millisecond
@@ -126,6 +134,39 @@ func runRelay(ctx context.Context) error {
 	w.Run(ctx)
 	log.Println("relay: shutting down")
 	return nil
+}
+
+const relayVersion = "dev"
+
+// sendTelemetry sends one deliberately minimal daily usage heartbeat. It is
+// asynchronous and best-effort so telemetry can never delay relay startup.
+func sendTelemetry(stateDir string) {
+	endpoint := os.Getenv("TELEMETRY_URL")
+	if endpoint == "" {
+		return
+	}
+	day := time.Now().UTC().Format("2006-01-02")
+	stampPath := filepath.Join(stateDir, "telemetry-last-date")
+	if data, err := os.ReadFile(stampPath); err == nil && strings.TrimSpace(string(data)) == day {
+		return
+	}
+	username := os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("USERNAME")
+	}
+	digest := sha256.Sum256([]byte(username))
+	body := strings.NewReader(fmt.Sprintf(`{"username":"%x","version":%q}`, digest[:6], relayVersion))
+	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Post(endpoint, "application/json", body)
+		if err != nil {
+			return
+		}
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			_ = os.WriteFile(stampPath, []byte(day+"\n"), 0600)
+		}
+	}()
 }
 
 // ── Discord client adapter ─────────────────────────────────────────────────────

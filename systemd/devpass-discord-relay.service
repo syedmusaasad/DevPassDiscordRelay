@@ -1,0 +1,15 @@
+[Unit]
+Description=DevPass Discord Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=XDG_DATA_HOME=%h/.local/share
+ExecStart=%h/.local/bin/relay
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

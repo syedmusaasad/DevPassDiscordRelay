@@ -2,7 +2,6 @@ package tmuxctl
 
 import (
 	"fmt"
-	"os/exec"
 )
 
 // KeyRecipe is the exact ordered sequence sent to a devpass-code pane.
@@ -24,7 +23,10 @@ var QuestionSelectRecipe = KeyRecipe{"Down", "Enter"}
 // keys rather than literal escape bytes so tmux preserves terminal semantics.
 func SendRecipe(target string, recipe KeyRecipe) error {
 	for _, key := range recipe {
-		cmd := exec.Command("tmux", "send-keys", "-t", target, key)
+		cmd, err := NewCommand("send-keys", "-t", target, key)
+		if err != nil {
+			return err
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("tmuxctl: send key %q: %w: %s", key, err, out)
 		}
