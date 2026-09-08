@@ -66,7 +66,20 @@ func IsolationMode() string {
 func NewBirthCommand(tmuxBin string, args ...string) (*exec.Cmd, string) {
 	mode := IsolationMode()
 	if mode == "systemd-user-scope" {
-		wrapped := append([]string{"--user", "--scope", "--collect", "--", tmuxBin}, args...)
+		wrapped := []string{"--user", "--scope", "--collect"}
+		// systemd-run --user can use the manager environment instead of the
+		// caller's. Preserve an isolated socket namespace explicitly.
+		if tmuxTmp := os.Getenv("TMUX_TMPDIR"); tmuxTmp != "" {
+			wrapped = append(wrapped, "--setenv=TMUX_TMPDIR="+tmuxTmp)
+		}
+		wrapped = append(wrapped, "--")
+		if tmuxTmp := os.Getenv("TMUX_TMPDIR"); tmuxTmp != "" {
+			// Also put it in the executed command. Some user managers do not
+			// propagate --setenv into a transient scope's client process.
+			wrapped = append(wrapped, "env", "TMUX_TMPDIR="+tmuxTmp)
+		}
+		wrapped = append(wrapped, tmuxBin)
+		wrapped = append(wrapped, args...)
 		return exec.Command("systemd-run", wrapped...), "systemd-user-scope"
 	}
 	return exec.Command(tmuxBin, args...), mode

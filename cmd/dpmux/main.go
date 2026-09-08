@@ -395,7 +395,7 @@ func runLaunch(args []string) error {
 	// on the inherited TMUX env var.  When the process is already inside a
 	// non-default tmux server, the TMUX env var would cause "new-session" to
 	// talk to the wrong server; using "-L default" bypasses this.
-	launchCmdExec, _ := tmuxctl.NewBirthCommand(tmuxBin, "-L", "default", "new-session", "-d", "-s", sessionName,
+	launchCmdExec, _ := tmuxctl.NewBirthCommand(tmuxBin, "new-session", "-d", "-s", sessionName,
 		"-x", "220", "-y", "50", launchCmd)
 	launchErr := launchCmdExec.Run()
 	if launchErr != nil {

@@ -33,6 +33,10 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	relayBin, dpmuxBin, mockDS := mustBin(t, "relay"), mustBin(t, "dpmux"), mustBin(t, "mock-discord")
 	xdg, state, tmuxTmp := t.TempDir(), t.TempDir(), t.TempDir()
 	t.Setenv("TMUX_TMPDIR", tmuxTmp)
+	tmuxBin := filepath.Join(t.TempDir(), "relay-test-tmux")
+	if err := os.WriteFile(tmuxBin, []byte("#!/bin/sh\nexec /usr/bin/tmux -L relay-test-"+fmt.Sprint(os.Getpid())+" \"$@\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	port, gwPort := "19928", "19929"
 	startMockDiscord(t, mockDS, port, gwPort)
 	if err := waitForHTTP("http://127.0.0.1:"+port+"/api/v10/gateway", 5*time.Second); err != nil {
@@ -45,7 +49,7 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	if err := seed.Run(); err != nil {
 		t.Fatalf("seed read-only relay DB: %v", err)
 	}
-	baseEnv := []string{"XDG_DATA_HOME=" + xdg, "TMUX_TMPDIR=" + tmuxTmp, "RELAY_STATE_DIR=" + state, "RELAY_DEVPASS_DB=" + filepath.Join(xdg, "devpass-code", "opencode.db"), "RELAY_DPMUX_BIN=" + dpmuxBin, "RELAY_DEVPASS_BIN=" + fakeBin, "FAKE_DP_FORCE_NEW_SESSION=1", "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001", "DISCORD_API_URL=http://127.0.0.1:" + port}
+	baseEnv := []string{"XDG_DATA_HOME=" + xdg, "TMUX_TMPDIR=" + tmuxTmp, "RELAY_TMUX_BIN=" + tmuxBin, "RELAY_STATE_DIR=" + state, "RELAY_DEVPASS_DB=" + filepath.Join(xdg, "devpass-code", "opencode.db"), "RELAY_DPMUX_BIN=" + dpmuxBin, "RELAY_DEVPASS_BIN=" + fakeBin, "FAKE_DP_FORCE_NEW_SESSION=1", "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001", "DISCORD_API_URL=http://127.0.0.1:" + port}
 	args := []string{"--user", "--unit", unit, "--property=Restart=no", "env"}
 	args = append(args, baseEnv...)
 	args = append(args, relayBin)
@@ -80,7 +84,7 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	if target == "" {
 		t.Fatal("relay did not spawn dpmux pending marker")
 	}
-	if err := waitForPaneText(t, target, "Ask anything...", 10*time.Second); err != nil {
+	if err := waitForPaneTextWithEnv(t, target, "Ask anything...", 10*time.Second, "TMUX_TMPDIR="+tmuxTmp, "RELAY_TMUX_BIN="+tmuxBin); err != nil {
 		stderr, _ := os.ReadFile(filepath.Join(state, "stderr-"+strings.Split(target, ":")[0]+".log"))
 		unitStatus, _ := exec.Command("systemctl", "--user", "status", unit, "--no-pager").CombinedOutput()
 		t.Fatalf("spawned pane not alive before restart: %v\ndpmux stderr:\n%s\nrelay unit:\n%s", err, stderr, unitStatus)
@@ -94,7 +98,32 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 			t.Fatalf("replace transient relay unit: %v\n%s", freshErr, freshOut)
 		}
 	}
-	if err := waitForPaneText(t, target, "Ask anything...", 10*time.Second); err != nil {
+	if err := waitForPaneTextWithEnv(t, target, "Ask anything...", 10*time.Second, "TMUX_TMPDIR="+tmuxTmp, "RELAY_TMUX_BIN="+tmuxBin); err != nil {
 		t.Fatalf("tmux pane did not survive relay restart: %v", err)
 	}
+}
+
+func waitForPaneTextWithEnv(t *testing.T, target, want string, timeout time.Duration, env ...string) error {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var latest []byte
+	for time.Now().Before(deadline) {
+		tmux := os.Getenv("RELAY_TMUX_BIN")
+		for _, entry := range env {
+			if strings.HasPrefix(entry, "RELAY_TMUX_BIN=") {
+				tmux = strings.TrimPrefix(entry, "RELAY_TMUX_BIN=")
+			}
+		}
+		cmd := exec.Command(tmux, "capture-pane", "-t", target, "-p")
+		cmd.Env = append(os.Environ(), env...)
+		out, err := cmd.Output()
+		if err == nil {
+			latest = out
+			if strings.Contains(string(out), want) {
+				return nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout after %s; pane content:\n%s", timeout, latest)
 }
