@@ -902,6 +902,9 @@ func (w *Watcher) discordEditContext(ctx context.Context, channelID, messageID, 
 }
 
 func (w *Watcher) discordSendComponents(channelID, content string, components []Component) (MsgRef, error) {
+	// Component writes are ordinary Discord writes: pace them before both the
+	// initial request and any 429 retry so controls cannot bypass channel pacing.
+	w.throttle.Wait(channelID)
 	msg, err := w.discord.SendComponents(channelID, content, components)
 	if err == nil {
 		return msg, nil
@@ -909,15 +912,21 @@ func (w *Watcher) discordSendComponents(channelID, content string, components []
 	if retryAfter, ok := extractRetryAfter(err); ok {
 		w.throttle.SetBackoff(channelID, retryAfter)
 		defer w.throttle.ClearBackoff(channelID)
-		if err := waitForRetryAfter(w.runCtx, retryAfter); err != nil {
+		ctx := w.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := waitForRetryAfter(ctx, retryAfter); err != nil {
 			return MsgRef{}, err
 		}
+		w.throttle.Wait(channelID)
 		return w.discord.SendComponents(channelID, content, components)
 	}
 	return MsgRef{}, err
 }
 
 func (w *Watcher) discordEditComponents(channelID, messageID, content string, components []Component) error {
+	w.throttle.Wait(channelID)
 	err := w.discord.EditComponents(channelID, messageID, content, components)
 	if err == nil {
 		return nil
@@ -925,9 +934,14 @@ func (w *Watcher) discordEditComponents(channelID, messageID, content string, co
 	if retryAfter, ok := extractRetryAfter(err); ok {
 		w.throttle.SetBackoff(channelID, retryAfter)
 		defer w.throttle.ClearBackoff(channelID)
-		if err := waitForRetryAfter(w.runCtx, retryAfter); err != nil {
+		ctx := w.runCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := waitForRetryAfter(ctx, retryAfter); err != nil {
 			return err
 		}
+		w.throttle.Wait(channelID)
 		return w.discord.EditComponents(channelID, messageID, content, components)
 	}
 	return err
@@ -1152,7 +1166,6 @@ func parseQuestionPicker(pane string) (questionPicker, bool) {
 func (w *Watcher) postApproval(threadID, target string) {
 	approveID := fmt.Sprintf("approval:approve:%d", time.Now().UnixNano())
 	denyID := fmt.Sprintf("approval:deny:%d", time.Now().UnixNano())
-	w.throttle.Wait(threadID)
 	msg, err := w.discordSendComponents(threadID, "⚠️ **Permission required**\nApprove this devpass-code action?", []Component{
 		{Type: "button", CustomID: approveID, Label: "Approve", Style: "success"},
 		{Type: "button", CustomID: denyID, Label: "Deny", Style: "danger"},
@@ -1179,7 +1192,6 @@ func (w *Watcher) postApproval(threadID, target string) {
 				log.Printf("mirror: approval timeout deny: %v", err)
 				return
 			}
-			w.throttle.Wait(threadID)
 			if err := w.discordEditComponents(threadID, msg.ID, "⚠️ **Permission denied automatically** (approval timeout).", nil); err != nil {
 				log.Printf("mirror: edit timed-out approval: %v", err)
 			}
@@ -1193,7 +1205,6 @@ func (w *Watcher) postQuestion(threadID, target string, q questionPicker) {
 	for i, option := range q.options {
 		options = append(options, ComponentOption{Label: option, Value: fmt.Sprintf("%d", i)})
 	}
-	w.throttle.Wait(threadID)
 	msg, err := w.discordSendComponents(threadID, "❓ **Question:** "+q.prompt, []Component{{
 		Type: "select", CustomID: id, Placeholder: "Choose an answer", Options: options,
 	}})
@@ -1223,7 +1234,6 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 				return
 			}
 			w.pendingInteractions.take(strings.Replace(ev.CustomID, ":approve:", ":deny:", 1))
-			w.throttle.Wait(entry.threadID)
 			_ = w.discordEditComponents(entry.threadID, entry.messageID, "✅ **Permission approved**.", nil)
 			return
 		}
@@ -1232,7 +1242,6 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 			return
 		}
 		w.pendingInteractions.take(strings.Replace(ev.CustomID, ":deny:", ":approve:", 1))
-		w.throttle.Wait(entry.threadID)
 		_ = w.discordEditComponents(entry.threadID, entry.messageID, "⛔ **Permission denied**.", nil)
 	case "question":
 		if len(ev.Values) != 1 {
@@ -1246,7 +1255,6 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 			log.Printf("mirror: question recipe: %v", err)
 			return
 		}
-		w.throttle.Wait(entry.threadID)
 		_ = w.discordEditComponents(entry.threadID, entry.messageID, "✅ **Question answered.**", nil)
 	}
 }

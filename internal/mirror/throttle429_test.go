@@ -135,6 +135,27 @@ func TestThrottle_429Backoff(t *testing.T) {
 	t.Logf("✓ 429 backoff: %d calls, elapsed=%v (retry_after=%v)", mock.calls, elapsed.Round(time.Millisecond), minDelay)
 }
 
+// TestComponentWritesUseThrottleAnd429Retry ensures component controls cannot
+// sidestep the same pacing/backoff path used by ordinary Discord writes.
+func TestComponentWritesUseThrottleAnd429Retry(t *testing.T) {
+	mock := &mock429DiscordClient{retryMS: 20}
+	w := &Watcher{
+		discord:  mock,
+		throttle: NewThrottle(1, time.Millisecond),
+		sessions: &Sessions{path: t.TempDir() + "/sessions.json"},
+	}
+	start := time.Now()
+	if _, err := w.discordSendComponents("component-429", "permission", nil); err != nil {
+		t.Fatalf("component send: %v", err)
+	}
+	if mock.calls != 2 {
+		t.Fatalf("component send calls = %d, want 2 (429 then retry)", mock.calls)
+	}
+	if time.Since(start) < 10*time.Millisecond {
+		t.Fatal("component send did not wait for 429 backoff")
+	}
+}
+
 // TestThrottle_429BackoffCancellation verifies a real relay shutdown does not
 // remain blocked in a Discord RetryAfter sleep. The retry is not issued after
 // cancellation and the channel backoff is cleared.

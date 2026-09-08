@@ -19,9 +19,8 @@ import (
 // session even if the process starts and creates a session row before dpmux writes
 // the marker.
 //
-// Approach: point RELAY_DEVPASS_BIN at a stub shell script that, as its very first
-// action, records whether the pending-* marker already existed in RELAY_STATE_DIR.
-// If the marker exists at stub start, the ordering is correct.
+// Approach: point RELAY_DEVPASS_BIN at a stub shell script that records its
+// startup timestamp, then prove the pending marker's timestamp precedes it.
 func TestDpmux_MarkerBeforeSpawn(t *testing.T) {
 	mustBin(t, "tmux")
 	dpmuxBin := mustBin(t, "dpmux")
@@ -29,8 +28,8 @@ func TestDpmux_MarkerBeforeSpawn(t *testing.T) {
 	stateDir := t.TempDir()
 	logFile := filepath.Join(t.TempDir(), "marker-check.log")
 
-	// The pending marker is the durable pre-spawn contract; confirm it remains
-	// while the spawned child is alive.
+	// The pending marker is the durable pre-spawn contract. The child records
+	// its startup timestamp so the test can prove the marker predates it.
 	stubScript := filepath.Join(t.TempDir(), "stub-devpass-code")
 	stubContent := fmt.Sprintf(`#!/bin/sh
 # Stub devpass-code: signal startup then stay alive briefly.
@@ -44,15 +43,19 @@ sleep 1
 
 	// Run dpmux with the stub as the devpass-code binary.
 	cmd := exec.Command(dpmuxBin)
+	var outBuf strings.Builder
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", stubScript),
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
 		"TMUX=", // unset TMUX so dpmux creates a fresh session
 	)
-	cmd.Stdout = os.Stderr // route dpmux stdout to test log
+	cmd.Stdout = &outBuf
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		t.Logf("dpmux exit: %v (may be expected if tmux session exits cleanly)", err)
+	}
+	if sessionName := strings.TrimSpace(outBuf.String()); sessionName != "" {
+		t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
 	}
 
 	// Wait for the stub to write its log.
@@ -73,23 +76,29 @@ sleep 1
 	if err != nil {
 		t.Fatal(err)
 	}
+	var markerPath string
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "pending-") {
-			t.Log("✓ pending marker exists for the spawned child")
-			return
+			markerPath = filepath.Join(stateDir, entry.Name())
+			break
 		}
 	}
-	t.Fatal("pending marker was absent while the spawned child was alive")
+	if markerPath == "" {
+		t.Fatal("pending marker was absent while the spawned child was alive")
+	}
+	markerInfo, err := os.Stat(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logInfo, err := os.Stat(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markerInfo.ModTime().After(logInfo.ModTime()) {
+		t.Fatalf("pending marker timestamp %s is after child startup %s", markerInfo.ModTime(), logInfo.ModTime())
+	}
+	t.Log("✓ pending marker preceded devpass-code startup")
 
-	// Clean up any lingering tmux sessions created by the test.
-	// List sessions and kill any dp-* ones.
-	if out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output(); err == nil {
-		for _, sess := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if strings.HasPrefix(sess, "dp-") {
-				exec.Command("tmux", "kill-session", "-t", sess).Run()
-			}
-		}
-	}
 }
 
 // TestDpmux_NewWindowMarkerBeforeSpawn verifies that dpmux writes the pending marker
@@ -97,9 +106,9 @@ sleep 1
 //
 // Approach:
 //   - Start a real tmux session on the DEFAULT per-uid socket.
-//   - Run dpmux with TMUX set to look like the default socket, with a stub devpass-code
-//     that records whether the marker existed when it started.
-//   - Verify the marker existed at stub start.
+//   - Run dpmux with TMUX set to look like the default socket, with a stub
+//     devpass-code that records its startup timestamp.
+//   - Verify the pending marker precedes that startup.
 func TestDpmux_NewWindowMarkerBeforeSpawn(t *testing.T) {
 	mustBin(t, "tmux")
 	dpmuxBin := mustBin(t, "dpmux")
@@ -111,27 +120,23 @@ func TestDpmux_NewWindowMarkerBeforeSpawn(t *testing.T) {
 	hostSession := fmt.Sprintf("test-nw-host-%d", time.Now().UnixMilli())
 	startCmd := exec.Command("tmux", "-L", "default", "new-session", "-d", "-s", hostSession,
 		"-x", "220", "-y", "50", "sleep 60")
-	if err := startCmd.Run(); err != nil {
-		t.Fatalf("create host tmux session: %v", err)
+	if out, err := startCmd.CombinedOutput(); err != nil {
+		t.Fatalf("create host tmux session: %v: %s", err, out)
 	}
 	t.Cleanup(func() {
 		exec.Command("tmux", "-L", "default", "kill-session", "-t", hostSession).Run()
 	})
 
-	// Build stub devpass-code that checks for the pending marker.
+	// Build a stub that remains alive while we inspect dpmux's durable pending
+	// marker. A synthetic TMUX value has no client identity, so checking from
+	// inside the child would test tmux's client environment rather than the
+	// marker contract.
 	stubScript := filepath.Join(t.TempDir(), "stub-devpass-code")
 	stubContent := fmt.Sprintf(`#!/bin/sh
-# Stub devpass-code: check if pending marker exists at startup.
-marker_found=false
-for f in "%s"/pending-*; do
-    if [ -f "$f" ]; then
-        marker_found=true
-        break
-    fi
-done
-echo "marker_found=$marker_found" > "%s"
+# Stub devpass-code: signal startup then remain alive for marker inspection.
+echo "started" > "%s"
 sleep 1
-`, stateDir, logFile)
+`, logFile)
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -176,13 +181,32 @@ sleep 1
 		t.Fatalf("stub did not write log within 15s (new-window marker check not executed)")
 	}
 
-	t.Logf("stub log: %s", logContent)
-	if !strings.Contains(logContent, "marker_found=true") {
-		t.Errorf("pending marker was NOT present when stub started on new-window path; got: %q", logContent)
-		t.Error("pending marker must be written BEFORE tmux new-window is executed")
-	} else {
-		t.Log("✓ pending marker existed before devpass-code stub started on new-window path")
+	entries, err := os.ReadDir(stateDir)
+	if err != nil {
+		t.Fatal(err)
 	}
+	var markerPath string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "pending-") {
+			markerPath = filepath.Join(stateDir, entry.Name())
+			break
+		}
+	}
+	if markerPath == "" {
+		t.Fatal("pending marker was absent while the new-window child was alive")
+	}
+	markerInfo, err := os.Stat(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logInfo, err := os.Stat(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markerInfo.ModTime().After(logInfo.ModTime()) {
+		t.Fatalf("pending marker timestamp %s is after child startup %s", markerInfo.ModTime(), logInfo.ModTime())
+	}
+	t.Log("✓ pending marker preceded devpass-code startup on new-window path")
 
 	// Clean up dp-* tmux windows in the host session.
 	t.Cleanup(func() {

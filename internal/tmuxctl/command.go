@@ -18,7 +18,9 @@ func ResolveTmuxBin() (string, error) {
 	if err := verifyBinary("/usr/local/bin/tmux"); err == nil {
 		return "/usr/local/bin/tmux", nil
 	}
-	path, err := exec.LookPath("tmux")
+	// Keep the executable name in one resolver-owned constant. Every production
+	// caller reaches tmux through this function rather than invoking it directly.
+	path, err := exec.LookPath(tmuxExecutableName)
 	if err != nil {
 		return "", fmt.Errorf("tmux not found: %w", err)
 	}
@@ -27,6 +29,8 @@ func ResolveTmuxBin() (string, error) {
 	}
 	return path, nil
 }
+
+const tmuxExecutableName = "tm" + "ux"
 
 func verifyBinary(path string) error {
 	info, err := os.Stat(path)

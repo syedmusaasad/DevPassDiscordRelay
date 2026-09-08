@@ -67,7 +67,9 @@ func runUpdate() error {
 	if err != nil {
 		return err
 	}
-	commands := [][]string{{"fetch", "--tags"}, {"checkout", "latest"}, {"pull", "--ff-only", "origin", "latest"}}
+	// The install marker names a real checkout. Update its checked-out branch;
+	// do not assume a fictitious "latest" tag exists.
+	commands := [][]string{{"fetch", "--tags"}, {"pull", "--ff-only"}}
 	for _, args := range commands {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
@@ -84,7 +86,31 @@ func runUpdate() error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rebuild: %w", err)
 	}
+	if err := installUpdatedBinaries(root); err != nil {
+		return err
+	}
 	promptRestart()
+	return nil
+}
+
+func installUpdatedBinaries(root string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	destDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return err
+	}
+	for _, name := range []string{"relay", "dpmux"} {
+		data, err := os.ReadFile(filepath.Join(root, "bin", name))
+		if err != nil {
+			return fmt.Errorf("read rebuilt %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(destDir, name), data, 0755); err != nil {
+			return fmt.Errorf("install rebuilt %s: %w", name, err)
+		}
+	}
 	return nil
 }
 

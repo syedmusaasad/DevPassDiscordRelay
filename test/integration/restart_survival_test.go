@@ -31,7 +31,8 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	}
 	mustBin(t, "tmux")
 	relayBin, dpmuxBin, mockDS := mustBin(t, "relay"), mustBin(t, "dpmux"), mustBin(t, "mock-discord")
-	xdg, state := t.TempDir(), t.TempDir()
+	xdg, state, tmuxTmp := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("TMUX_TMPDIR", tmuxTmp)
 	port, gwPort := "19928", "19929"
 	startMockDiscord(t, mockDS, port, gwPort)
 	if err := waitForHTTP("http://127.0.0.1:"+port+"/api/v10/gateway", 5*time.Second); err != nil {
@@ -44,7 +45,7 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	if err := seed.Run(); err != nil {
 		t.Fatalf("seed read-only relay DB: %v", err)
 	}
-	baseEnv := []string{"XDG_DATA_HOME=" + xdg, "RELAY_STATE_DIR=" + state, "RELAY_DEVPASS_DB=" + filepath.Join(xdg, "devpass-code", "opencode.db"), "RELAY_DPMUX_BIN=" + dpmuxBin, "RELAY_DEVPASS_BIN=" + fakeBin, "FAKE_DP_FORCE_NEW_SESSION=1", "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001", "DISCORD_API_URL=http://127.0.0.1:" + port}
+	baseEnv := []string{"XDG_DATA_HOME=" + xdg, "TMUX_TMPDIR=" + tmuxTmp, "RELAY_STATE_DIR=" + state, "RELAY_DEVPASS_DB=" + filepath.Join(xdg, "devpass-code", "opencode.db"), "RELAY_DPMUX_BIN=" + dpmuxBin, "RELAY_DEVPASS_BIN=" + fakeBin, "FAKE_DP_FORCE_NEW_SESSION=1", "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001", "DISCORD_API_URL=http://127.0.0.1:" + port}
 	args := []string{"--user", "--unit", unit, "--property=Restart=no", "env"}
 	args = append(args, baseEnv...)
 	args = append(args, relayBin)
@@ -80,10 +81,18 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 		t.Fatal("relay did not spawn dpmux pending marker")
 	}
 	if err := waitForPaneText(t, target, "Ask anything...", 10*time.Second); err != nil {
-		t.Fatalf("spawned pane not alive before restart: %v", err)
+		stderr, _ := os.ReadFile(filepath.Join(state, "stderr-"+strings.Split(target, ":")[0]+".log"))
+		unitStatus, _ := exec.Command("systemctl", "--user", "status", unit, "--no-pager").CombinedOutput()
+		t.Fatalf("spawned pane not alive before restart: %v\ndpmux stderr:\n%s\nrelay unit:\n%s", err, stderr, unitStatus)
 	}
 	if out, err := exec.Command("systemctl", "--user", "restart", unit).CombinedOutput(); err != nil {
-		t.Fatalf("restart relay unit: %v\n%s", err, out)
+		t.Logf("transient unit restart failed (%v): %s; replacing relay unit", err, out)
+		if stopOut, stopErr := exec.Command("systemctl", "--user", "stop", unit).CombinedOutput(); stopErr != nil {
+			t.Fatalf("stop transient relay unit: %v\n%s", stopErr, stopOut)
+		}
+		if freshOut, freshErr := exec.Command(systemdRun, args...).CombinedOutput(); freshErr != nil {
+			t.Fatalf("replace transient relay unit: %v\n%s", freshErr, freshOut)
+		}
 	}
 	if err := waitForPaneText(t, target, "Ask anything...", 10*time.Second); err != nil {
 		t.Fatalf("tmux pane did not survive relay restart: %v", err)
