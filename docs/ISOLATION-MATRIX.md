@@ -22,9 +22,9 @@ docker compose -f docker-compose.test.yml run --rm test go test -p 1 -count=1 -t
 Exit code: 0
 
 ```text
---- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.76s)
 PASS
-ok  github.com/devpass/devpass-discord-relay/test/integration  2.449s
+ok  github.com/devpass/devpass-discord-relay/test/integration  2.767s
 ```
 
 RUN 2/5: PASS
@@ -38,9 +38,9 @@ docker compose -f docker-compose.test.yml run --rm test go test -p 1 -count=1 -t
 Exit code: 0
 
 ```text
---- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
 PASS
-ok  github.com/devpass/devpass-discord-relay/test/integration  2.452s
+ok  github.com/devpass/devpass-discord-relay/test/integration  2.441s
 ```
 
 RUN 3/5: PASS
@@ -56,7 +56,7 @@ Exit code: 0
 ```text
 --- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
 PASS
-ok  github.com/devpass/devpass-discord-relay/test/integration  2.448s
+ok  github.com/devpass/devpass-discord-relay/test/integration  2.443s
 ```
 
 RUN 4/5: PASS
@@ -70,9 +70,9 @@ docker compose -f docker-compose.test.yml run --rm test go test -p 1 -count=1 -t
 Exit code: 0
 
 ```text
---- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.46s)
 PASS
-ok  github.com/devpass/devpass-discord-relay/test/integration  2.449s
+ok  github.com/devpass/devpass-discord-relay/test/integration  2.461s
 ```
 
 RUN 5/5: PASS
@@ -86,7 +86,7 @@ docker compose -f docker-compose.test.yml run --rm test go test -p 1 -count=1 -t
 Exit code: 0
 
 ```text
---- PASS: TestInvariant4_ResumeRefusalRetry (2.44s)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.45s)
 PASS
-ok  github.com/devpass/devpass-discord-relay/test/integration  2.447s
+ok  github.com/devpass/devpass-discord-relay/test/integration  2.453s
 ```
