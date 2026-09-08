@@ -34,6 +34,7 @@ unit:
 
 ## integration: run integration tests in Docker
 integration: build
+	@docker compose -f docker-compose.test.yml build test
 	@if [ -n "$(T)" ]; then \
 	  docker compose -f docker-compose.test.yml run --rm test go test -p 1 -tags integration -v -run "$(T)" ./test/integration/...; \
 	else \

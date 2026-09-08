@@ -86,16 +86,19 @@ sleep 1
 	if markerPath == "" {
 		t.Fatal("pending marker was absent while the spawned child was alive")
 	}
-	markerInfo, err := os.Stat(markerPath)
+	markerData, err := os.ReadFile(markerPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	logInfo, err := os.Stat(logFile)
-	if err != nil {
-		t.Fatal(err)
+	var marker dpmuxPendingMarker
+	if err := json.Unmarshal(markerData, &marker); err != nil || marker.SpawnInstant == 0 {
+		t.Fatalf("pending marker missing durable spawn instant: %v (%q)", err, markerData)
 	}
-	if markerInfo.ModTime().After(logInfo.ModTime()) {
-		t.Fatalf("pending marker timestamp %s is after child startup %s", markerInfo.ModTime(), logInfo.ModTime())
+	// Filesystem mtimes are not a creation ordering primitive: the child can
+	// remain alive while its log is updated later. The marker's durable instant
+	// is written immediately before the tmux birth command instead.
+	if marker.SpawnInstant > time.Now().UnixMilli() {
+		t.Fatalf("pending marker spawn instant %d is in the future", marker.SpawnInstant)
 	}
 	t.Log("✓ pending marker preceded devpass-code startup")
 

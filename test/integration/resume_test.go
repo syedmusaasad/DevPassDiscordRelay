@@ -34,6 +34,10 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	fakeDP := mustBin(t, "fake-devpass-code")
 	relayBin := mustBin(t, "relay")
 	mockDS := mustBin(t, "mock-discord")
+	// Keep this long-running retry test on its own tmux server. A stale dp-*
+	// session on the shared default socket can otherwise satisfy a readiness
+	// probe while the pane under test dies.
+	tmuxTmpDir := tmuxIsolatedSocketDir(t)
 
 	xdgHome := t.TempDir()
 	stateDir := t.TempDir()
@@ -80,6 +84,7 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 		"FAKE_DP_SWALLOW_UNTIL_READY=1",
 		fakeDP, "--auto", "--session", sessionID,
 	)
+	dpCmd.Env = append(envWithoutTmux(), fmt.Sprintf("TMUX_TMPDIR=%s", tmuxTmpDir))
 	if out, err := dpCmd.CombinedOutput(); err != nil {
 		t.Fatalf("start fake-devpass-code tmux: %v\n%s", err, out)
 	}
@@ -95,13 +100,14 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 
 	// Start relay.
 	relayCmd := exec.Command(relayBin)
-	relayCmd.Env = append(os.Environ(),
+	relayCmd.Env = append(envWithoutTmux(),
 		"DISCORD_TOKEN=test-token",
 		"DISCORD_CHANNEL_ID=test-echo-ch",
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
 		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
 		"DISCORD_USER_ID=user-echo-001",
+		fmt.Sprintf("TMUX_TMPDIR=%s", tmuxTmpDir),
 	)
 	relayCmd.Stdout = io.Discard
 	relayCmd.Stderr = os.Stderr

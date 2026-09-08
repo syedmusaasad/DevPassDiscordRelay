@@ -391,11 +391,10 @@ func runLaunch(args []string) error {
 	}
 
 	launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce, stderrLog)
-	// Run tmux on the default socket by name ("-L default") rather than relying
-	// on the inherited TMUX env var.  When the process is already inside a
-	// non-default tmux server, the TMUX env var would cause "new-session" to
-	// talk to the wrong server; using "-L default" bypasses this.
-	launchCmdExec, _ := tmuxctl.NewBirthCommand(tmuxBin, "new-session", "-d", "-s", sessionName,
+	// Select the default socket explicitly. Merely clearing the client identity
+	// is insufficient: tmux can still derive a foreign socket from the inherited
+	// client environment. -L default continues to honor TMUX_TMPDIR.
+	launchCmdExec, _ := tmuxctl.NewBirthCommand(tmuxBin, "-L", "default", "new-session", "-d", "-s", sessionName,
 		"-x", "220", "-y", "50", launchCmd)
 	launchErr := launchCmdExec.Run()
 	if launchErr != nil {
