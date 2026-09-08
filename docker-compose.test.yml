@@ -12,5 +12,8 @@ services:
       - CGO_ENABLED=0
     # tmux requires a terminal; allocate a pseudo-TTY
     tty: true
+    # The disposable user manager used by restart-survival needs its own
+    # writable cgroup view; no host HOME, Discord, or user manager is mounted.
+    privileged: true
     # Remove container after run
     # (handled by --rm in make integration)

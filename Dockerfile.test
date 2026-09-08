@@ -1,5 +1,6 @@
 # Dockerfile.test — integration test image
 # - Has tmux, Go, and the test binaries
+# - Starts an isolated user systemd manager for lifecycle tests
 # - Runs as a non-root user with a throwaway HOME
 # - Never mounts the developer's HOME
 
@@ -8,9 +9,15 @@ FROM ubuntu:24.04
 # Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
+    systemd \
+    dbus \
     ca-certificates \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+# A user manager refuses to start unless this normal systemd runtime marker is
+# present. The container still uses its own throwaway runtime and D-Bus.
+RUN mkdir -p /run/systemd/system
 
 # Install Go
 RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
@@ -37,6 +44,8 @@ RUN go mod download
 # Copy full source
 COPY --chown=testuser:testuser . .
 
+RUN chmod 0755 test/integration/with-user-manager.sh
+
 # Pre-build test binaries + fake-devpass-code for PATH
 RUN mkdir -p /home/testuser/bin && \
     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code && \
@@ -45,5 +54,7 @@ RUN mkdir -p /home/testuser/bin && \
     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
 
 ENV PATH="/home/testuser/bin:${PATH}"
+
+ENTRYPOINT ["test/integration/with-user-manager.sh"]
 
 CMD ["go", "test", "-tags", "integration", "-v", "./test/integration/..."]
