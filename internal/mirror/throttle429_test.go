@@ -90,6 +90,8 @@ func (m *mock429DiscordClient) EditComponents(channelID, messageID, content stri
 
 func (m *mock429DiscordClient) OnInteraction(fn InteractionHandler) {}
 
+func (m *mock429DiscordClient) AcknowledgeInteraction(InteractionEvent) error { return nil }
+
 // TestThrottle_429Backoff verifies that when a Discord send returns a typed
 // *discordgo.RateLimitError (RetryAfter), the watcher:
 //  1. Extracts the retry_after duration via the *discordgo.RateLimitError primary path.

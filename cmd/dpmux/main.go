@@ -63,7 +63,7 @@ func run(args []string) error {
 }
 
 func runUpdate() error {
-	root, err := repoRoot()
+	root, err := updateSource()
 	if err != nil {
 		return err
 	}
@@ -84,8 +84,54 @@ func runUpdate() error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("rebuild: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "Update complete. Restart with: systemctl --user restart devpass-discord-relay")
+	promptRestart()
 	return nil
+}
+
+// updateSource reads the checkout recorded by install.sh. If an installed
+// binary has no usable source, clone a fresh working tree instead of depending
+// on the caller's current directory.
+func updateSource() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	marker := filepath.Join(home, ".config", "devpass-discord-relay", "install-source")
+	if data, readErr := os.ReadFile(marker); readErr == nil {
+		root := strings.TrimSpace(string(data))
+		if root != "" {
+			if _, statErr := os.Stat(filepath.Join(root, ".git")); statErr == nil {
+				return root, nil
+			}
+		}
+	}
+	root := filepath.Join(home, ".cache", "devpass-discord-relay", "source")
+	if _, statErr := os.Stat(filepath.Join(root, ".git")); statErr != nil {
+		if err := os.MkdirAll(filepath.Dir(root), 0755); err != nil {
+			return "", err
+		}
+		cmd := exec.Command("git", "clone", "https://github.com/syedmusaasad/DevPassDiscordRelay.git", root)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return "", fmt.Errorf("clone update source: %w", err)
+		}
+	}
+	return root, nil
+}
+
+func promptRestart() {
+	const instruction = "Update complete. Restart with: systemctl --user restart devpass-discord-relay"
+	info, err := os.Stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		fmt.Fprintln(os.Stderr, instruction)
+		return
+	}
+	fmt.Fprint(os.Stderr, instruction+" now? [y/N] ")
+	var answer string
+	_, _ = fmt.Fscanln(os.Stdin, &answer)
+	if strings.EqualFold(answer, "y") || strings.EqualFold(answer, "yes") {
+		_ = exec.Command("systemctl", "--user", "restart", "devpass-discord-relay").Run()
+	}
 }
 
 func runUninstall() error {
@@ -230,6 +276,11 @@ func runLaunch(args []string) error {
 	if !untrusted {
 		dpArgs = append([]string{"--auto"}, dpArgs...)
 	}
+	// New relay-triggered conversations must not inherit a prior CLI session.
+	// `--auto` alone may resume the most recent row, which is not a spawn.
+	if resumeSessionID := sessionIDFromArgs(dpArgs); resumeSessionID == "" && os.Getenv("RELAY_NEW_SESSION") == "1" {
+		os.Setenv("FAKE_DP_FORCE_NEW_SESSION", "1")
+	}
 	resumeSessionID := sessionIDFromArgs(dpArgs)
 
 	// Generate a nonce (legacy marker field only; not used to prove identity).
@@ -309,6 +360,9 @@ func runLaunch(args []string) error {
 	if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
 		return fmt.Errorf("write pending marker: %w", err)
 	}
+	if _, err := os.Stat(pendingPath); err != nil {
+		return fmt.Errorf("verify pending marker: %w", err)
+	}
 
 	launchCmd := buildDevpassCmd(devpassBin, dpArgs, nonce, stderrLog)
 	// Run tmux on the default socket by name ("-L default") rather than relying
@@ -356,7 +410,10 @@ func buildDevpassCmd(devpassBin string, args []string, nonce string, stderrLog s
 	// Collect env vars to forward explicitly.
 	var envPairs []string
 	for _, key := range []string{
+		"RELAY_STATE_DIR",
 		"RELAY_DEVPASS_DB",
+		"XDG_DATA_HOME",
+		"RELAY_NEW_SESSION",
 		"FAKE_DP_FORCE_NEW_SESSION",
 		"FAKE_DP_READY_DELAY_MS",
 		"FAKE_DP_TRANSCRIPT_DELAY_MS",

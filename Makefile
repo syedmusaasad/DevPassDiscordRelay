@@ -47,11 +47,12 @@ test: unit integration
 clean:
 	rm -rf bin/
 
-## restart-survival-host: verify a disposable user unit does not kill tmux sessions
+## restart-survival-host: run relay as a disposable user unit, spawn through dpmux, restart relay, and prove the pane survives
 restart-survival-host: build
-	@unit="relay-test-$$$$"; session="$$unit-tmux"; data="$$(mktemp -d)"; \
-	  trap 'systemctl --user stop "$$unit" >/dev/null 2>&1 || true; tmux kill-session -t "$$session" >/dev/null 2>&1 || true; rm -rf "$$data"' EXIT; \
-	  systemd-run --user --unit "$$unit" --collect --remain-after-exit env XDG_DATA_HOME="$$data" tmux new-session -d -s "$$session" 'sleep 60'; \
-	  systemctl --user restart "$$unit" >/dev/null; \
-	  tmux has-session -t "$$session"; \
-	  echo "restart survival: PASS"
+	@unit="relay-test-$$$$"; data="$$(mktemp -d)"; state="$$data/state"; \
+	  trap 'systemctl --user stop "$$unit" >/dev/null 2>&1 || true; tmux kill-server >/dev/null 2>&1 || true; rm -rf "$$data"' EXIT; \
+	  mkdir -p "$$state"; XDG_DATA_HOME="$$data" ./bin/fake-devpass-code --auto </dev/null >/dev/null; \
+	  systemd-run --user --unit "$$unit" env XDG_DATA_HOME="$$data" RELAY_STATE_DIR="$$state" RELAY_DEVPASS_DB="$$data/devpass-code/opencode.db" RELAY_DEVPASS_BIN="$(CURDIR)/bin/fake-devpass-code" FAKE_DP_FORCE_NEW_SESSION=1 DISCORD_TOKEN=host-proof DISCORD_CHANNEL_ID=host-proof DISCORD_API_URL=http://127.0.0.1:9 ./bin/relay; sleep 1; \
+	  XDG_DATA_HOME="$$data" RELAY_STATE_DIR="$$state" RELAY_DEVPASS_DB="$$data/devpass-code/opencode.db" RELAY_DEVPASS_BIN="$(CURDIR)/bin/fake-devpass-code" FAKE_DP_FORCE_NEW_SESSION=1 ./bin/dpmux >/dev/null; session="$$(tmux list-sessions -F '#{session_name}' | grep '^dp-' | tail -1)"; test -n "$$session"; \
+	  systemctl --user restart "$$unit"; tmux has-session -t "$$session"; \
+	  echo "restart survival: PASS (relay lifecycle; dpmux birth scope survived)"

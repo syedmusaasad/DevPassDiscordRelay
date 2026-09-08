@@ -86,6 +86,8 @@ func (a *mirrorDiscordAdapter) EditComponents(channelID, messageID, content stri
 
 func (a *mirrorDiscordAdapter) OnInteraction(fn mirror.InteractionHandler) {}
 
+func (a *mirrorDiscordAdapter) AcknowledgeInteraction(mirror.InteractionEvent) error { return nil }
+
 // TestDiscord429_ProductionClientBackoff is the phase-15 regression for
 // finding 3: it must use the REAL production client constructor
 // (discord.New), not a custom error stub, and must prove the request that

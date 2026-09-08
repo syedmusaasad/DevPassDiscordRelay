@@ -71,6 +71,7 @@ type DiscordClient interface {
 	SendComponents(channelID, content string, components []Component) (MsgRef, error)
 	EditComponents(channelID, messageID, content string, components []Component) error
 	OnInteraction(fn InteractionHandler)
+	AcknowledgeInteraction(InteractionEvent) error
 }
 
 // Component is a transport-neutral Discord message component.
@@ -91,6 +92,8 @@ type ComponentOption struct {
 
 // InteractionEvent is the subset of a component interaction used by the relay.
 type InteractionEvent struct {
+	ID        string
+	Token     string
 	ChannelID string
 	AuthorID  string
 	IsBot     bool
@@ -189,6 +192,17 @@ func (p *pendingInteractionStore) take(id string) (pendingInteraction, bool) {
 		delete(p.entries, id)
 	}
 	return entry, ok
+}
+
+func (p *pendingInteractionStore) has(threadID, target, kind string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, entry := range p.entries {
+		if entry.threadID == threadID && entry.target == target && entry.kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // suppressedEchoStore tracks prompt texts that have already been echoed to
@@ -598,8 +612,7 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 	// no blocking transcript part (TRANSCRIPT-SCHEMA.md §Approval prompt).
 	approvalTicker := time.NewTicker(250 * time.Millisecond)
 	defer approvalTicker.Stop()
-	approvalPosted := false
-	questionPosted := false
+	approvalSignature := ""
 
 	sendTyping := func() {
 		if err := w.discord.SendTyping(threadID); err != nil {
@@ -630,10 +643,17 @@ func (w *Watcher) mirrorContent(ctx context.Context, sessionID, threadID, tmuxTa
 			if captureErr != nil {
 				continue
 			}
+			approvalPosted := w.pendingInteractions.has(threadID, tmuxTarget, "approval")
+			signature := approvalPromptSignature(pane)
+			if isApprovalPrompt(pane) && signature != approvalSignature {
+				approvalPosted = false
+			}
 			if !approvalPosted && isApprovalPrompt(pane) {
 				approvalPosted = true
+				approvalSignature = signature
 				w.postApproval(threadID, tmuxTarget)
 			}
+			questionPosted := w.pendingInteractions.has(threadID, tmuxTarget, "question")
 			if !questionPosted {
 				if q, ok := parseQuestionPicker(pane); ok {
 					questionPosted = true
@@ -881,6 +901,38 @@ func (w *Watcher) discordEditContext(ctx context.Context, channelID, messageID, 
 	return err
 }
 
+func (w *Watcher) discordSendComponents(channelID, content string, components []Component) (MsgRef, error) {
+	msg, err := w.discord.SendComponents(channelID, content, components)
+	if err == nil {
+		return msg, nil
+	}
+	if retryAfter, ok := extractRetryAfter(err); ok {
+		w.throttle.SetBackoff(channelID, retryAfter)
+		defer w.throttle.ClearBackoff(channelID)
+		if err := waitForRetryAfter(w.runCtx, retryAfter); err != nil {
+			return MsgRef{}, err
+		}
+		return w.discord.SendComponents(channelID, content, components)
+	}
+	return MsgRef{}, err
+}
+
+func (w *Watcher) discordEditComponents(channelID, messageID, content string, components []Component) error {
+	err := w.discord.EditComponents(channelID, messageID, content, components)
+	if err == nil {
+		return nil
+	}
+	if retryAfter, ok := extractRetryAfter(err); ok {
+		w.throttle.SetBackoff(channelID, retryAfter)
+		defer w.throttle.ClearBackoff(channelID)
+		if err := waitForRetryAfter(w.runCtx, retryAfter); err != nil {
+			return err
+		}
+		return w.discord.EditComponents(channelID, messageID, content, components)
+	}
+	return err
+}
+
 // waitForRetryAfter waits for a relay-owned rate-limit delay without making
 // shutdown wait for the complete RetryAfter duration.
 func waitForRetryAfter(ctx context.Context, retryAfter time.Duration) error {
@@ -1017,12 +1069,20 @@ func formatToolEmbedSoftened(toolName, callID string) string {
 // Uses list-panes -t <target> (window-level check) rather than has-session,
 // so a dead pane inside a live session is correctly detected.
 func isTmuxPaneAlive(target string) bool {
-	err := exec.Command("tmux", "list-panes", "-t", target).Run()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return false
+	}
+	err = exec.Command(tmuxBin, "list-panes", "-t", target).Run()
 	return err == nil
 }
 
 func capturePaneText(target string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(tmuxBin, "capture-pane", "-t", target, "-p").Output()
 	if err != nil {
 		return "", err
 	}
@@ -1036,6 +1096,16 @@ func isApprovalPrompt(pane string) bool {
 	return strings.Contains(pane, "Permission required") &&
 		strings.Contains(pane, "Allow once") &&
 		strings.Contains(pane, "Reject")
+}
+
+func approvalPromptSignature(pane string) string {
+	last := ""
+	for _, line := range strings.Split(pane, "\n") {
+		if strings.Contains(line, "Permission required") {
+			last = strings.TrimSpace(line)
+		}
+	}
+	return last
 }
 
 type questionPicker struct {
@@ -1082,7 +1152,8 @@ func parseQuestionPicker(pane string) (questionPicker, bool) {
 func (w *Watcher) postApproval(threadID, target string) {
 	approveID := fmt.Sprintf("approval:approve:%d", time.Now().UnixNano())
 	denyID := fmt.Sprintf("approval:deny:%d", time.Now().UnixNano())
-	msg, err := w.discord.SendComponents(threadID, "⚠️ **Permission required**\nApprove this devpass-code action?", []Component{
+	w.throttle.Wait(threadID)
+	msg, err := w.discordSendComponents(threadID, "⚠️ **Permission required**\nApprove this devpass-code action?", []Component{
 		{Type: "button", CustomID: approveID, Label: "Approve", Style: "success"},
 		{Type: "button", CustomID: denyID, Label: "Deny", Style: "danger"},
 	})
@@ -1108,7 +1179,8 @@ func (w *Watcher) postApproval(threadID, target string) {
 				log.Printf("mirror: approval timeout deny: %v", err)
 				return
 			}
-			if err := w.discord.EditComponents(threadID, msg.ID, "⚠️ **Permission denied automatically** (approval timeout).", nil); err != nil {
+			w.throttle.Wait(threadID)
+			if err := w.discordEditComponents(threadID, msg.ID, "⚠️ **Permission denied automatically** (approval timeout).", nil); err != nil {
 				log.Printf("mirror: edit timed-out approval: %v", err)
 			}
 		}
@@ -1121,7 +1193,8 @@ func (w *Watcher) postQuestion(threadID, target string, q questionPicker) {
 	for i, option := range q.options {
 		options = append(options, ComponentOption{Label: option, Value: fmt.Sprintf("%d", i)})
 	}
-	msg, err := w.discord.SendComponents(threadID, "❓ **Question:** "+q.prompt, []Component{{
+	w.throttle.Wait(threadID)
+	msg, err := w.discordSendComponents(threadID, "❓ **Question:** "+q.prompt, []Component{{
 		Type: "select", CustomID: id, Placeholder: "Choose an answer", Options: options,
 	}})
 	if err != nil {
@@ -1132,6 +1205,9 @@ func (w *Watcher) postQuestion(threadID, target string, q questionPicker) {
 }
 
 func (w *Watcher) handleInteraction(ev InteractionEvent) {
+	if err := w.discord.AcknowledgeInteraction(ev); err != nil {
+		log.Printf("mirror: interaction acknowledgement: %v", err)
+	}
 	if !inject.ShouldAcceptAuthor(ev.AuthorID, ev.IsBot, w.cfg.AllowedUserID) {
 		return
 	}
@@ -1147,7 +1223,8 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 				return
 			}
 			w.pendingInteractions.take(strings.Replace(ev.CustomID, ":approve:", ":deny:", 1))
-			_ = w.discord.EditComponents(entry.threadID, entry.messageID, "✅ **Permission approved**.", nil)
+			w.throttle.Wait(entry.threadID)
+			_ = w.discordEditComponents(entry.threadID, entry.messageID, "✅ **Permission approved**.", nil)
 			return
 		}
 		if err := tmuxctl.SendRecipe(entry.target, tmuxctl.ApprovalDenyRecipe); err != nil {
@@ -1155,7 +1232,8 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 			return
 		}
 		w.pendingInteractions.take(strings.Replace(ev.CustomID, ":deny:", ":approve:", 1))
-		_ = w.discord.EditComponents(entry.threadID, entry.messageID, "⛔ **Permission denied**.", nil)
+		w.throttle.Wait(entry.threadID)
+		_ = w.discordEditComponents(entry.threadID, entry.messageID, "⛔ **Permission denied**.", nil)
 	case "question":
 		if len(ev.Values) != 1 {
 			return
@@ -1168,7 +1246,8 @@ func (w *Watcher) handleInteraction(ev InteractionEvent) {
 			log.Printf("mirror: question recipe: %v", err)
 			return
 		}
-		_ = w.discord.EditComponents(entry.threadID, entry.messageID, "✅ **Question answered.**", nil)
+		w.throttle.Wait(entry.threadID)
+		_ = w.discordEditComponents(entry.threadID, entry.messageID, "✅ **Question answered.**", nil)
 	}
 }
 
@@ -1340,7 +1419,11 @@ func teardownPaneTarget(tmuxTarget string) {
 	log.Printf("mirror: teardown pane %s", tmuxTarget)
 
 	// Get the PID of the pane's foreground process group leader.
-	out, err := exec.Command("tmux", "display-message", "-t", tmuxTarget, "-p", "#{pane_pid}").Output()
+	tmuxBin, tmuxErr := tmuxctl.ResolveTmuxBin()
+	if tmuxErr != nil {
+		return
+	}
+	out, err := exec.Command(tmuxBin, "display-message", "-t", tmuxTarget, "-p", "#{pane_pid}").Output()
 	if err == nil {
 		pid := strings.TrimSpace(string(out))
 		if pid != "" {
@@ -1355,7 +1438,7 @@ func teardownPaneTarget(tmuxTarget string) {
 	if idx := strings.LastIndex(tmuxTarget, "."); idx >= 0 {
 		windowTarget = tmuxTarget[:idx]
 	}
-	exec.Command("tmux", "kill-window", "-t", windowTarget).Run() //nolint:errcheck
+	exec.Command(tmuxBin, "kill-window", "-t", windowTarget).Run() //nolint:errcheck
 }
 
 // resumeDeadSession is called when a thread reply arrives for a session whose
@@ -1432,6 +1515,9 @@ func (w *Watcher) spawnResume(ctx context.Context, sessionID string) (string, er
 	}
 	if w.cfg.DBPath != "" {
 		env = setEnvVar(env, "RELAY_DEVPASS_DB", w.cfg.DBPath)
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		env = setEnvVar(env, "XDG_DATA_HOME", xdg)
 	}
 	env = setEnvVar(env, "TMUX", "")
 	cmd.Env = env
@@ -1560,7 +1646,11 @@ func (w *Watcher) detectRefusal(ctx context.Context, sessionID, tmuxTarget strin
 
 // capturePaneTextRaw captures visible text from a tmux pane target.
 func capturePaneTextRaw(target string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(tmuxBin, "capture-pane", "-t", target, "-p").Output()
 	if err != nil {
 		return "", err
 	}
@@ -1948,6 +2038,7 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	if w.cfg.DBPath != "" {
 		env = setEnvVar(env, "RELAY_DEVPASS_DB", w.cfg.DBPath)
 	}
+	env = setEnvVar(env, "RELAY_NEW_SESSION", "1")
 	// Unset TMUX so dpmux always creates a fresh tmux session (never new-window
 	// in the relay's own session if the relay runs inside tmux).
 	env = setEnvVar(env, "TMUX", "")

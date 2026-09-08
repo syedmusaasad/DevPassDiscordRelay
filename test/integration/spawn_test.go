@@ -191,7 +191,7 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		db3.QueryRow(
-			`SELECT id FROM session WHERE id != ? AND time_created >= ? AND parent_id IS NULL ORDER BY time_created ASC LIMIT 1`,
+			`SELECT id FROM session WHERE id != ? AND time_created >= ? AND parent_id IS NULL ORDER BY time_created DESC LIMIT 1`,
 			staleSessionID, spawnStart,
 		).Scan(&newSessionID)
 		if newSessionID != "" {
@@ -293,8 +293,16 @@ func TestSpawn_ChannelMessageTriggersDpmux(t *testing.T) {
 	defer db.Close()
 
 	var sessionID string
-	if err := waitForSessionRow(t, db, &sessionID, 10*time.Second); err != nil {
-		t.Fatalf("no session row: %v", err)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		err = db.QueryRow(`SELECT session_id FROM part WHERE data LIKE ? ORDER BY time_created DESC LIMIT 1`, "%please do something useful for me%").Scan(&sessionID)
+		if err == nil && sessionID != "" {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if sessionID == "" {
+		t.Fatal("no spawned prompt owner")
 	}
 	t.Logf("session id: %s", sessionID)
 

@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/devpass/devpass-discord-relay/internal/tmuxctl"
 )
 
 const (
@@ -195,7 +197,11 @@ func waitForReady(target string) {
 
 // capturePaneText captures the visible text of a tmux pane.
 func capturePaneText(target string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", target, "-p").Output()
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(tmuxBin, "capture-pane", "-t", target, "-p").Output()
 	if err != nil {
 		return "", err
 	}
@@ -204,12 +210,16 @@ func capturePaneText(target string) (string, error) {
 
 // sendKeysLiteral sends text to a tmux pane using -l (literal) mode, then Enter.
 func sendKeysLiteral(target, text string) error {
-	cmd := exec.Command("tmux", "send-keys", "-t", target, "-l", text)
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(tmuxBin, "send-keys", "-t", target, "-l", text)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("inject: send-keys literal: %w: %s", err, out)
 	}
 	// Press Enter
-	cmd2 := exec.Command("tmux", "send-keys", "-t", target, "", "Enter")
+	cmd2 := exec.Command(tmuxBin, "send-keys", "-t", target, "", "Enter")
 	if out, err := cmd2.CombinedOutput(); err != nil {
 		return fmt.Errorf("inject: send-keys enter: %w: %s", err, out)
 	}

@@ -177,10 +177,17 @@ func run(args []string) error {
 	fmt.Printf("   ┃  Pl-Interactive · devpass-code %s\n", devpassVersion)
 	fmt.Println("")
 	fmt.Println("> ")
+	permissionPrompts := 0
 	if os.Getenv("FAKE_DP_PERMISSION_PROMPT") == "1" {
+		permissionPrompts = 1
+	}
+	if n := envMS("FAKE_DP_PERMISSION_PROMPTS"); n > 0 {
+		permissionPrompts = int(n)
+	}
+	for i := 0; i < permissionPrompts; i++ {
 		// Test double for the documented pane-only approval prompt. Its response
 		// parser deliberately consumes terminal arrow sequences until Enter.
-		fmt.Println("  △ Permission required")
+		fmt.Printf("  △ Permission required (%d)\n", i+1)
 		fmt.Println("    # Shell command")
 		fmt.Println("  $ ls")
 		fmt.Println("   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm")

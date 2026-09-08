@@ -60,11 +60,12 @@ func IsolationMode() string {
 // NewBirthCommand wraps only commands that may create a tmux server. The
 // fallback is intentionally direct when a user manager is not reachable.
 func NewBirthCommand(tmuxBin string, args ...string) (*exec.Cmd, string) {
-	if IsolationMode() == "systemd-user-scope" {
-		wrapped := append([]string{"--user", "--scope", "--collect", "--quiet", "--", tmuxBin}, args...)
+	mode := IsolationMode()
+	if mode == "systemd-user-scope" {
+		wrapped := append([]string{"--user", "--scope", "--collect", "--", tmuxBin}, args...)
 		return exec.Command("systemd-run", wrapped...), "systemd-user-scope"
 	}
-	return exec.Command(tmuxBin, args...), IsolationMode()
+	return exec.Command(tmuxBin, args...), mode
 }
 
 // NewCommand creates an unwrapped read-only or control tmux command.

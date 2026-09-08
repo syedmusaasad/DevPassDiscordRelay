@@ -19,11 +19,9 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -34,6 +32,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/devpass/devpass-discord-relay/internal/mirror"
+	"github.com/devpass/devpass-discord-relay/internal/telemetry"
+	"github.com/devpass/devpass-discord-relay/internal/tmuxctl"
 	_ "modernc.org/sqlite"
 )
 
@@ -103,7 +103,7 @@ func runRelay(ctx context.Context) error {
 			cfg.SessionTTL = time.Duration(days) * 24 * time.Hour
 		}
 	}
-	sendTelemetry(stateDir)
+	telemetry.Send(stateDir, relayVersion, os.Getenv("TELEMETRY_URL"))
 	if v := os.Getenv("RELAY_SPAWN_BIND_TIMEOUT_MS"); v != "" {
 		if ms, parseErr := strconv.Atoi(v); parseErr == nil && ms > 0 {
 			cfg.SpawnBindTimeout = time.Duration(ms) * time.Millisecond
@@ -130,6 +130,7 @@ func runRelay(ctx context.Context) error {
 		defer dc.s.Close()
 	}
 
+	log.Printf("relay: tmux isolation mode: %s", tmuxctl.IsolationMode())
 	log.Println("relay: starting watcher")
 	w.Run(ctx)
 	log.Println("relay: shutting down")
@@ -137,37 +138,6 @@ func runRelay(ctx context.Context) error {
 }
 
 const relayVersion = "dev"
-
-// sendTelemetry sends one deliberately minimal daily usage heartbeat. It is
-// asynchronous and best-effort so telemetry can never delay relay startup.
-func sendTelemetry(stateDir string) {
-	endpoint := os.Getenv("TELEMETRY_URL")
-	if endpoint == "" {
-		return
-	}
-	day := time.Now().UTC().Format("2006-01-02")
-	stampPath := filepath.Join(stateDir, "telemetry-last-date")
-	if data, err := os.ReadFile(stampPath); err == nil && strings.TrimSpace(string(data)) == day {
-		return
-	}
-	username := os.Getenv("USER")
-	if username == "" {
-		username = os.Getenv("USERNAME")
-	}
-	digest := sha256.Sum256([]byte(username))
-	body := strings.NewReader(fmt.Sprintf(`{"username":"%x","version":%q}`, digest[:6], relayVersion))
-	go func() {
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Post(endpoint, "application/json", body)
-		if err != nil {
-			return
-		}
-		resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			_ = os.WriteFile(stampPath, []byte(day+"\n"), 0600)
-		}
-	}()
-}
 
 // ── Discord client adapter ─────────────────────────────────────────────────────
 
@@ -281,7 +251,7 @@ func (d *discordAdapter) OnInteraction(fn mirror.InteractionHandler) {
 			return
 		}
 		data := ev.MessageComponentData()
-		interaction := mirror.InteractionEvent{ChannelID: ev.ChannelID, CustomID: data.CustomID, Values: data.Values}
+		interaction := mirror.InteractionEvent{ID: ev.ID, Token: ev.Token, ChannelID: ev.ChannelID, CustomID: data.CustomID, Values: data.Values}
 		if ev.Member != nil && ev.Member.User != nil {
 			interaction.AuthorID = ev.Member.User.ID
 			interaction.IsBot = ev.Member.User.Bot
@@ -290,6 +260,12 @@ func (d *discordAdapter) OnInteraction(fn mirror.InteractionHandler) {
 			interaction.IsBot = ev.User.Bot
 		}
 		fn(interaction)
+	})
+}
+
+func (d *discordAdapter) AcknowledgeInteraction(ev mirror.InteractionEvent) error {
+	return d.s.InteractionRespond(&discordgo.Interaction{ID: ev.ID, Token: ev.Token}, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
 	})
 }
 
