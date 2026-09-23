@@ -15,8 +15,8 @@ func ResolveTmuxBin() (string, error) {
 		}
 		return configured, nil
 	}
-	if err := verifyBinary("/usr/local/bin/tmux"); err == nil {
-		return "/usr/local/bin/tmux", nil
+	if err := verifyBinary(localTmuxBin); err == nil {
+		return localTmuxBin, nil
 	}
 	// Keep the executable name in one resolver-owned constant. Every production
 	// caller reaches tmux through this function rather than invoking it directly.
@@ -30,7 +30,11 @@ func ResolveTmuxBin() (string, error) {
 	return path, nil
 }
 
-const tmuxExecutableName = "tm" + "ux"
+const tmuxExecutableName = "tmux"
+
+// localTmuxBin is a variable so resolver tests can exercise the managed-path
+// fallback without writing to /usr/local/bin.
+var localTmuxBin = "/usr/local/bin/tmux"
 
 func verifyBinary(path string) error {
 	info, err := os.Stat(path)

@@ -67,9 +67,8 @@ func runUpdate() error {
 	if err != nil {
 		return err
 	}
-	// The install marker names a real checkout. Update its checked-out branch;
-	// do not assume a fictitious "latest" tag exists.
-	commands := [][]string{{"fetch", "--tags"}, {"pull", "--ff-only"}}
+	// Releases are pinned by the latest tag, not the checkout's current branch.
+	commands := [][]string{{"fetch", "--tags"}, {"checkout", "--detach", "latest"}}
 	for _, args := range commands {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
@@ -347,8 +346,7 @@ func runLaunch(args []string) error {
 				StderrLog:    stderrLog,
 				SessionID:    resumeSessionID,
 			}
-			markerJSON, _ := json.Marshal(marker)
-			if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
+			if err := writePendingMarker(pendingPath, marker); err != nil {
 				return fmt.Errorf("write pending marker: %w", err)
 			}
 
@@ -382,8 +380,7 @@ func runLaunch(args []string) error {
 		StderrLog:    stderrLog,
 		SessionID:    resumeSessionID,
 	}
-	markerJSON, _ := json.Marshal(marker)
-	if err := os.WriteFile(pendingPath, markerJSON, 0644); err != nil {
+	if err := writePendingMarker(pendingPath, marker); err != nil {
 		return fmt.Errorf("write pending marker: %w", err)
 	}
 	if _, err := os.Stat(pendingPath); err != nil {
@@ -405,6 +402,36 @@ func runLaunch(args []string) error {
 	fmt.Fprintf(os.Stderr, "[dpmux] session %q started, target=%s\n", sessionName, tmuxTarget)
 	fmt.Println(sessionName)
 	return nil
+}
+
+// writePendingMarker durably publishes the marker before the tmux child is
+// allowed to start, including when that child is born in a systemd user scope.
+func writePendingMarker(path string, marker pendingMarker) error {
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 // sessionIDFromArgs returns the exact historical id requested by a resume.

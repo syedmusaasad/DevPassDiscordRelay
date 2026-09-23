@@ -191,10 +191,15 @@ func run(args []string) error {
 		fmt.Println("    # Shell command")
 		fmt.Println("  $ ls")
 		fmt.Println("   Allow once   Allow always   Reject  ctrl+f fullscreen  ⇆ select  enter confirm")
-		if err := consumePickerResponse(os.Stdin); err != nil {
+		rejected, err := consumePickerResponse(os.Stdin)
+		if err != nil {
 			return err
 		}
-		fmt.Println("Permission denied")
+		if rejected {
+			fmt.Println("Permission rejected")
+		} else {
+			fmt.Println("Permission approved")
+		}
 		fmt.Println("> ")
 	}
 	if os.Getenv("FAKE_DP_QUESTION_PICKER") == "1" {
@@ -204,7 +209,7 @@ func run(args []string) error {
 		fmt.Println("> apple")
 		fmt.Println("  pear")
 		fmt.Println("enter to confirm")
-		if err := consumePickerResponse(os.Stdin); err != nil {
+		if _, err := consumePickerResponse(os.Stdin); err != nil {
 			return err
 		}
 		fmt.Println("Question answered")
@@ -286,18 +291,34 @@ func run(args []string) error {
 	return nil
 }
 
-// consumePickerResponse waits for the final Enter from a tmux key recipe. The
-// value itself is unimportant to the fake; the relay tests need it to keep the
-// pane occupied until its pinned recipe is sent.
-func consumePickerResponse(in *os.File) error {
+// consumePickerResponse waits for the final Enter from a tmux key recipe and
+// reports whether the recipe moved away from the default selection.
+func consumePickerResponse(in *os.File) (bool, error) {
 	reader := bufio.NewReader(in)
+	rejected := false
 	for {
 		b, err := reader.ReadByte()
 		if err != nil {
-			return err
+			return false, err
+		}
+		if b == 0x1b {
+			next, err := reader.ReadByte()
+			if err != nil {
+				return false, err
+			}
+			if next == '[' {
+				arrow, err := reader.ReadByte()
+				if err != nil {
+					return false, err
+				}
+				if arrow == 'C' {
+					rejected = true
+				}
+			}
+			continue
 		}
 		if b == '\n' || b == '\r' {
-			return nil
+			return rejected, nil
 		}
 	}
 }

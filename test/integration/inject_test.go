@@ -378,24 +378,36 @@ func TestApproval_AutoDenyTimeout(t *testing.T) {
 	if err := waitForMessageContent(t, mockPort, "Permission denied automatically", 12*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitForPaneText(t, paneTarget, "Permission denied", 5*time.Second); err != nil {
+	if err := waitForPaneText(t, paneTarget, "Permission rejected", 5*time.Second); err != nil {
 		t.Fatalf("deny recipe did not resolve pane: %v", err)
 	}
 }
 
-// TestInteraction_Ack proves an Approve click is callback-acknowledged before
-// its pinned recipe reaches the permission pane.
-func TestInteraction_Ack(t *testing.T) {
+func TestInteraction_ApproveDrivesApproveRecipe(t *testing.T) {
+	testInteractionApproval(t, "approve", "Permission approved", "Permission rejected")
+}
+
+func TestInteraction_DenyDrivesDenyRecipe(t *testing.T) {
+	testInteractionApproval(t, "deny", "Permission rejected", "Permission approved")
+}
+
+// testInteractionApproval proves each approval action is acknowledged and
+// drives its own distinct pinned recipe in the fake pane.
+func testInteractionApproval(t *testing.T, action, want, absent string) {
+	t.Helper()
 	mustBin(t, "tmux")
 	fakeDP, relayBin, mockDS := mustBin(t, "fake-devpass-code"), mustBin(t, "relay"), mustBin(t, "mock-discord")
 	xdgHome, stateDir := t.TempDir(), t.TempDir()
 	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
 	mockPort, mockGWPort := "19924", "19925"
+	if action == "deny" {
+		mockPort, mockGWPort = "19928", "19929"
+	}
 	startMockDiscord(t, mockDS, mockPort, mockGWPort)
 	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
-	sessionName := "dp-interaction-ack"
+	sessionName := "dp-interaction-" + action
 	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
 	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "env", "XDG_DATA_HOME="+xdgHome, "FAKE_DP_PERMISSION_PROMPT=1", fakeDP, "--auto").CombinedOutput(); err != nil {
 		t.Fatalf("start fake CLI: %v: %s", err, out)
@@ -424,13 +436,23 @@ func TestInteraction_Ack(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = relay.Process.Kill() })
-	approveID := waitForComponentID(t, mockPort, "Permission required", 10*time.Second)
-	interaction := map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{"id": "interaction-ack-001", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2", "member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001", "bot": false}}, "data": map[string]interface{}{"custom_id": approveID, "component_type": 2}}}
+	componentID := waitForComponentID(t, mockPort, "Permission required", 10*time.Second)
+	if action == "deny" {
+		componentID = waitForComponentIDAt(t, mockPort, "Permission required", 1, 10*time.Second)
+	}
+	interaction := map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{"id": "interaction-" + action + "-001", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2", "member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001", "bot": false}}, "data": map[string]interface{}{"custom_id": componentID, "component_type": 2}}}
 	if err := dispatchEvent(mockPort, interaction); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitForPaneText(t, pane, "Permission denied", 5*time.Second); err != nil {
-		t.Fatalf("approve recipe did not reach pane: %v", err)
+	if err := waitForPaneText(t, pane, want, 5*time.Second); err != nil {
+		t.Fatalf("%s recipe did not reach pane: %v", action, err)
+	}
+	paneText, err := exec.Command("tmux", "capture-pane", "-t", pane, "-p").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(paneText), absent) {
+		t.Fatalf("%s recipe also produced opposite pane text %q:\n%s", action, absent, paneText)
 	}
 	if !sentContainsCallback(mockPort) {
 		t.Fatal("interaction acknowledgement callback was not sent")
@@ -481,7 +503,7 @@ func TestApproval_SecondPromptGetsButtons(t *testing.T) {
 	if err := dispatchEvent(mockPort, map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{"id": "second-first", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2", "member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001"}}, "data": map[string]interface{}{"custom_id": first, "component_type": 2}}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := waitForPaneText(t, pane, "Permission denied", 5*time.Second); err != nil {
+	if err := waitForPaneText(t, pane, "Permission approved", 5*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -500,6 +522,10 @@ func TestApproval_SecondPromptGetsButtons(t *testing.T) {
 }
 
 func waitForComponentID(t *testing.T, port, content string, timeout time.Duration) string {
+	return waitForComponentIDAt(t, port, content, 0, timeout)
+}
+
+func waitForComponentIDAt(t *testing.T, port, content string, index int, timeout time.Duration) string {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -513,8 +539,8 @@ func waitForComponentID(t *testing.T, port, content string, timeout time.Duratio
 					} `json:"components"`
 				} `json:"components"`
 			}
-			if json.Unmarshal(message, &body) == nil && strings.Contains(body.Content, content) && len(body.Components) > 0 && len(body.Components[0].Components) > 0 {
-				return body.Components[0].Components[0].CustomID
+			if json.Unmarshal(message, &body) == nil && strings.Contains(body.Content, content) && len(body.Components) > 0 && len(body.Components[0].Components) > index {
+				return body.Components[0].Components[index].CustomID
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

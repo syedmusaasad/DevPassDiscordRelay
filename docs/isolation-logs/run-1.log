@@ -1,0 +1,19 @@
+=== RUN   TestInvariant4_ResumeRefusalRetry
+2026/09/23 05:15:11 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/23 05:15:11 main.go:133: relay: tmux isolation mode: systemd-user-scope
+2026/09/23 05:15:11 main.go:134: relay: starting watcher
+2026/09/23 05:15:12 watcher.go:513: mirror: attaching session ses_resume_refusal_001 target=dp-refusal-test:0.0
+    resume_test.go:409: thread created: id=2
+2026/09/23 05:15:13 watcher.go:1301: mirror: handleDiscordMessage: channel=2 session=ses_resume_refusal_001
+2026/09/23 05:15:13 watcher.go:1340: mirror: pane dp-refusal-test:0.0 is dead for session ses_resume_refusal_001 – attempting resume
+2026/09/23 05:15:13 watcher.go:1460: mirror: resumeDeadSession: session=ses_resume_refusal_001
+2026/09/23 05:15:13 watcher.go:1537: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/09/23 05:15:13 watcher.go:1600: mirror: refusal detected via pane text for ses_resume_refusal_001
+2026/09/23 05:15:13 watcher.go:1479: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
+2026/09/23 05:15:13 watcher.go:1427: mirror: teardown pane dp-resume-retry-1-1152:0.0
+2026/09/23 05:15:13 watcher.go:1537: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+    resume_test.go:431: ✓ Invariant 4a: resume refusal detected, retried, prompt injected successfully
+    resume_test.go:442: dpmux call count: 2 (expected exactly 2)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.75s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	2.752s

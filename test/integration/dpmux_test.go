@@ -19,24 +19,28 @@ import (
 // session even if the process starts and creates a session row before dpmux writes
 // the marker.
 //
-// Approach: point RELAY_DEVPASS_BIN at a stub shell script that records its
-// startup timestamp, then prove the pending marker's timestamp precedes it.
+// Approach: point RELAY_DEVPASS_BIN at a stub that records whether the marker
+// existed at the child's own startup.
 func TestDpmux_MarkerBeforeSpawn(t *testing.T) {
 	mustBin(t, "tmux")
 	dpmuxBin := mustBin(t, "dpmux")
 
-	stateDir := t.TempDir()
+	stateDir := dpmuxStateDir(t)
 	logFile := filepath.Join(t.TempDir(), "marker-check.log")
 
-	// The pending marker is the durable pre-spawn contract. The child records
-	// its startup timestamp so the test can prove the marker predates it.
+	// The pending marker is the durable pre-spawn contract. The child observes
+	// it before doing anything else.
 	stubScript := filepath.Join(t.TempDir(), "stub-devpass-code")
 	stubContent := fmt.Sprintf(`#!/bin/sh
-# Stub devpass-code: signal startup then stay alive briefly.
-echo "started" > "%s"
+# Stub devpass-code: observe the marker at process startup, then stay alive.
+marker_found=false
+for marker in "%s"/pending-*; do
+  if [ -e "$marker" ]; then marker_found=true; fi
+done
+printf 'marker_found=%%s\n' "$marker_found" > "%s"
 # Sleep briefly so tmux session stays alive long enough to be useful.
 sleep 1
-`, logFile)
+`, stateDir, logFile)
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -72,6 +76,9 @@ sleep 1
 	if logContent == "" {
 		t.Fatalf("stub did not write log file within 10s (marker check not executed)")
 	}
+	if logContent != "marker_found=true" {
+		t.Fatalf("child started before pending marker existed: %q", logContent)
+	}
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
 		t.Fatal(err)
@@ -94,9 +101,6 @@ sleep 1
 	if err := json.Unmarshal(markerData, &marker); err != nil || marker.SpawnInstant == 0 {
 		t.Fatalf("pending marker missing durable spawn instant: %v (%q)", err, markerData)
 	}
-	// Filesystem mtimes are not a creation ordering primitive: the child can
-	// remain alive while its log is updated later. The marker's durable instant
-	// is written immediately before the tmux birth command instead.
 	if marker.SpawnInstant > time.Now().UnixMilli() {
 		t.Fatalf("pending marker spawn instant %d is in the future", marker.SpawnInstant)
 	}
@@ -110,16 +114,18 @@ sleep 1
 // Approach:
 //   - Start a real tmux session on the DEFAULT per-uid socket.
 //   - Run dpmux with TMUX set to look like the default socket, with a stub
-//     devpass-code that records its startup timestamp.
-//   - Verify the pending marker precedes that startup.
+//     devpass-code that observes the marker at its own startup.
+//   - Verify the marker was already present.
 func TestDpmux_NewWindowMarkerBeforeSpawn(t *testing.T) {
 	mustBin(t, "tmux")
 	dpmuxBin := mustBin(t, "dpmux")
 
-	stateDir := t.TempDir()
+	stateDir := dpmuxStateDir(t)
 	logFile := filepath.Join(t.TempDir(), "nw-marker-check.log")
 
 	// Create a host tmux session on the default socket.
+	// Ensure a previous short-lived test server cannot leave a stale socket.
+	_ = exec.Command("tmux", "-L", "default", "kill-server").Run()
 	hostSession := fmt.Sprintf("test-nw-host-%d", time.Now().UnixMilli())
 	startCmd := exec.Command("tmux", "-L", "default", "new-session", "-d", "-s", hostSession,
 		"-x", "220", "-y", "50", "sleep 60")
@@ -130,16 +136,17 @@ func TestDpmux_NewWindowMarkerBeforeSpawn(t *testing.T) {
 		exec.Command("tmux", "-L", "default", "kill-session", "-t", hostSession).Run()
 	})
 
-	// Build a stub that remains alive while the outer test observes the durable
-	// pending marker. The outer test verifies its content and target; filesystem
-	// mtimes are intentionally not used because they have insufficient ordering
-	// precision on all supported overlay filesystems.
+	// Build a stub that records the durable marker state at its own startup.
 	stubScript := filepath.Join(t.TempDir(), "stub-devpass-code")
 	stubContent := fmt.Sprintf(`#!/bin/sh
-# Stub devpass-code: signal startup then remain alive for marker inspection.
-echo "started" > "%s"
+# Stub devpass-code: observe marker state before remaining alive.
+marker_found=false
+for marker in "%s"/pending-*; do
+  if [ -e "$marker" ]; then marker_found=true; fi
+done
+printf 'marker_found=%%s\n' "$marker_found" > "%s"
 sleep 1
-`, logFile)
+`, stateDir, logFile)
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -183,6 +190,9 @@ sleep 1
 	if logContent == "" {
 		t.Fatalf("stub did not write log within 15s (new-window marker check not executed)")
 	}
+	if logContent != "marker_found=true" {
+		t.Fatalf("new-window child started before pending marker existed: %q", logContent)
+	}
 
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
@@ -219,6 +229,18 @@ type dpmuxPendingMarker struct {
 	Target       string `json:"target"`
 	Nonce        string `json:"nonce"`
 	SpawnInstant int64  `json:"spawnInstant"`
+}
+
+// dpmuxStateDir stays outside /tmp because the scope used for a fresh tmux
+// birth has a private /tmp; /workspace is the shared integration-test mount.
+func dpmuxStateDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/workspace", "dpmux-marker-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // TestDpmux_ForeignSocketFallsBackToDefault verifies that when dpmux is invoked
