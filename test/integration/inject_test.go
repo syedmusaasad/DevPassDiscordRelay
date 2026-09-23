@@ -113,8 +113,13 @@ func TestInject_ReadinessProbe(t *testing.T) {
 	}
 	t.Logf("thread created: id=%s", threadID)
 
-	// Give relay a moment to register the session in its sessions.json.
-	time.Sleep(300 * time.Millisecond)
+	// The mock dispatch endpoint queues events even before a relay WebSocket is
+	// connected.  Wait for the claimed thread record instead of sleeping: a
+	// MESSAGE_CREATE delivered during the gateway's READY handshake is otherwise
+	// silently lost and looks like a readiness-probe failure.
+	if err := waitForSessionRecord(stateDir, sessionID, 5*time.Second); err != nil {
+		t.Fatalf("relay did not register claimed session before dispatch: %v", err)
+	}
 
 	// Dispatch a MESSAGE_CREATE to the thread from the allowed user.
 	msgEvent := buildMessageEvent("msg-dispatch-001", threadID, "user-allowed-001", false, "hello from discord", nil)
@@ -771,4 +776,26 @@ func waitForUserPrompt(t *testing.T, db *sql.DB, sessionID, text string, timeout
 		time.Sleep(300 * time.Millisecond)
 	}
 	return fmt.Errorf("user prompt %q not found in DB for session %s after %s", text, sessionID, timeout)
+}
+
+func waitForSessionRecord(stateDir, sessionID string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	path := filepath.Join(stateDir, "sessions.json")
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			var records []struct {
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal(data, &records) == nil {
+				for _, record := range records {
+					if record.SessionID == sessionID {
+						return nil
+					}
+				}
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("session %s not present in %s after %s", sessionID, path, timeout)
 }

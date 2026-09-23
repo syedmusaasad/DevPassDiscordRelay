@@ -71,16 +71,26 @@ func NewBirthCommand(tmuxBin string, args ...string) (*exec.Cmd, string) {
 	mode := IsolationMode()
 	if mode == "systemd-user-scope" {
 		wrapped := []string{"--user", "--scope", "--collect"}
-		// systemd-run --user can use the manager environment instead of the
-		// caller's. Preserve an isolated socket namespace explicitly.
-		if tmuxTmp := os.Getenv("TMUX_TMPDIR"); tmuxTmp != "" {
-			wrapped = append(wrapped, "--setenv=TMUX_TMPDIR="+tmuxTmp)
+		// systemd-run --user starts the scope from the manager environment, not
+		// necessarily this dpmux process's environment.  Forward the values a
+		// tmux birth needs explicitly, both to the transient scope and to the
+		// tmux client itself.  In particular, RELAY_STATE_DIR contains the
+		// durable pending marker that must be visible before the child starts.
+		birthEnv := []string{"TMUX_TMPDIR", "RELAY_STATE_DIR", "HOME"}
+		var commandEnv []string
+		for _, key := range birthEnv {
+			if value := os.Getenv(key); value != "" {
+				assignment := key + "=" + value
+				wrapped = append(wrapped, "--setenv="+assignment)
+				commandEnv = append(commandEnv, assignment)
+			}
 		}
 		wrapped = append(wrapped, "--")
-		if tmuxTmp := os.Getenv("TMUX_TMPDIR"); tmuxTmp != "" {
-			// Also put it in the executed command. Some user managers do not
-			// propagate --setenv into a transient scope's client process.
-			wrapped = append(wrapped, "env", "TMUX_TMPDIR="+tmuxTmp)
+		if len(commandEnv) > 0 {
+			// Some user managers do not propagate --setenv into a transient
+			// scope's client process, so make the client environment explicit too.
+			wrapped = append(wrapped, "env")
+			wrapped = append(wrapped, commandEnv...)
 		}
 		wrapped = append(wrapped, tmuxBin)
 		wrapped = append(wrapped, args...)

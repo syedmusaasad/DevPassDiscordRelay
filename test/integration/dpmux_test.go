@@ -34,13 +34,13 @@ func TestDpmux_MarkerBeforeSpawn(t *testing.T) {
 	stubContent := fmt.Sprintf(`#!/bin/sh
 # Stub devpass-code: observe the marker at process startup, then stay alive.
 marker_found=false
-for marker in "%s"/pending-*; do
+for marker in "$RELAY_STATE_DIR"/pending-*; do
   if [ -e "$marker" ]; then marker_found=true; fi
 done
 printf 'marker_found=%%s\n' "$marker_found" > "%s"
 # Sleep briefly so tmux session stays alive long enough to be useful.
 sleep 1
-`, stateDir, logFile)
+`, logFile)
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -106,6 +106,77 @@ sleep 1
 	}
 	t.Log("✓ pending marker preceded devpass-code startup")
 
+}
+
+// TestDpmux_MarkerBeforeSpawn_SystemdScope exercises the fresh-server birth
+// path inside the user scope. The scope's manager environment is not the
+// dpmux process environment, so this is deliberately separate from the
+// general marker ordering test: the child must see the exact state directory
+// containing its already-published marker.
+func TestDpmux_MarkerBeforeSpawn_SystemdScope(t *testing.T) {
+	mustBin(t, "tmux")
+	if systemdRun, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skipf("systemd-run --user probe failed: %v", err)
+	} else if out, err := exec.Command(systemdRun, "--user", "--scope", "--collect", "true").CombinedOutput(); err != nil {
+		t.Skipf("systemd-run --user probe failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+	dpmuxBin := mustBin(t, "dpmux")
+	stateDir := dpmuxStateDir(t)
+	logFile := filepath.Join(t.TempDir(), "scope-marker-check.log")
+
+	stubScript := filepath.Join(t.TempDir(), "stub-devpass-code")
+	stubContent := fmt.Sprintf(`#!/bin/sh
+marker_found=false
+for marker in "$RELAY_STATE_DIR"/pending-*; do
+  if [ -e "$marker" ]; then marker_found=true; fi
+done
+printf 'marker_found=%%s state_dir=%%s home=%%s\n' "$marker_found" "$RELAY_STATE_DIR" "$HOME" > %s
+sleep 1
+`, shellQuoteForScript(logFile))
+	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
+		t.Fatalf("write stub script: %v", err)
+	}
+
+	cmd := exec.Command(dpmuxBin)
+	var stdout, stderr strings.Builder
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", stubScript),
+		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
+		"TMUX=",
+	)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dpmux scope launch: %v\n%s", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tmux isolation mode: systemd-user-scope") {
+		t.Fatalf("dpmux did not use forced systemd scope: %s", stderr.String())
+	}
+	if sessionName := strings.TrimSpace(stdout.String()); sessionName != "" {
+		t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	var logContent string
+	for time.Now().Before(deadline) {
+		if data, err := os.ReadFile(logFile); err == nil && len(data) > 0 {
+			logContent = strings.TrimSpace(string(data))
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if logContent == "" {
+		t.Fatal("scope child did not write marker observation")
+	}
+	wantPrefix := "marker_found=true state_dir=" + stateDir + " home=" + os.Getenv("HOME")
+	if logContent != wantPrefix {
+		t.Fatalf("scope child did not inherit dpmux marker environment: got %q, want %q", logContent, wantPrefix)
+	}
+}
+
+// shellQuoteForScript quotes a literal for the POSIX shell used by marker stubs.
+func shellQuoteForScript(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // TestDpmux_NewWindowMarkerBeforeSpawn verifies that dpmux writes the pending marker

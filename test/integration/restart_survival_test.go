@@ -114,13 +114,7 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 		t.Fatalf("spawned pane not alive before restart: %v\ndpmux stderr:\n%s\nrelay unit:\n%s", err, stderr, unitStatus)
 	}
 	if out, err := exec.Command("systemctl", "--user", "restart", unit).CombinedOutput(); err != nil {
-		t.Logf("transient unit restart failed (%v): %s; replacing relay unit", err, out)
-		if stopOut, stopErr := exec.Command("systemctl", "--user", "stop", unit).CombinedOutput(); stopErr != nil {
-			t.Fatalf("stop transient relay unit: %v\n%s", stopErr, stopOut)
-		}
-		if freshOut, freshErr := exec.Command(systemdRun, args...).CombinedOutput(); freshErr != nil {
-			t.Fatalf("replace transient relay unit: %v\n%s", freshErr, freshOut)
-		}
+		t.Fatalf("restart original transient relay unit: %v\n%s", err, out)
 	}
 	if err := waitForPaneTextWithEnv(t, target, "Ask anything...", 10*time.Second, "TMUX_TMPDIR="+tmuxTmp, "RELAY_TMUX_BIN="+tmuxBin); err != nil {
 		t.Fatalf("tmux pane did not survive relay restart: %v", err)

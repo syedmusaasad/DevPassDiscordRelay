@@ -411,10 +411,21 @@ func writePendingMarker(path string, marker pendingMarker) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	// Publish atomically: a child born immediately after this function returns
+	// must see either the old complete marker or this complete marker, never a
+	// newly-created empty/truncated file.  The file and parent directory fsyncs
+	// make the write durable before tmux is allowed to birth the child.
+	tmpPath := fmt.Sprintf("%s.tmp-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		return err
 	}
+	removeTemp := true
+	defer func() {
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		return err
@@ -426,6 +437,10 @@ func writePendingMarker(path string, marker pendingMarker) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	removeTemp = false
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
 		return err
