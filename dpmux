@@ -26,8 +26,38 @@ SESSION="$1"
 shift
 COMMAND="$*"
 
+verify_binary() {
+  [[ -x "$1" ]] && "$1" -V >/dev/null 2>&1
+}
+
+# Prefer the explicit operator selection, then the managed installation, and
+# only then PATH. This prevents a random PATH entry from replacing the relay's
+# tmux client. The Go dpmux binary follows this same resolution contract.
+if [[ -n "${RELAY_TMUX_BIN:-}" ]]; then
+  verify_binary "$RELAY_TMUX_BIN" || { echo "dpmux: invalid RELAY_TMUX_BIN: $RELAY_TMUX_BIN" >&2; exit 2; }
+  TMUX_BIN="$RELAY_TMUX_BIN"
+elif verify_binary /usr/local/bin/tmux; then
+  TMUX_BIN=/usr/local/bin/tmux
+elif TMUX_BIN="$(command -v tmux 2>/dev/null)" && verify_binary "$TMUX_BIN"; then
+  :
+else
+  echo "dpmux: tmux not found" >&2
+  exit 2
+fi
+
+# A detached new-session can birth a tmux server. Put that client/server tree
+# in its own user scope when possible so stopping relay never reaps it. The
+# direct fallback deliberately remains usable on hosts without user systemd.
+tmux_birth() {
+  if command -v systemd-run >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    systemd-run --user --scope --collect -- "$TMUX_BIN" "$@"
+  else
+    "$TMUX_BIN" "$@"
+  fi
+}
+
 # Kill any existing session with this name (best-effort)
-tmux kill-session -t "$SESSION" 2>/dev/null || true
+"$TMUX_BIN" kill-session -t "$SESSION" 2>/dev/null || true
 
 # Build the env forwarding string
 ENV_FWD=""
@@ -39,8 +69,9 @@ for var in XDG_DATA_HOME FAKE_DP_SCRIPT FAKE_DP_REFUSE_FIRST_RESUME \
   fi
 done
 
-# Start a new detached tmux session running the command
-tmux new-session -d -s "$SESSION" -x 220 -y 50 \
+# Start a new detached tmux session running the command. This is the only
+# invocation here that can birth a server, so only it enters the user scope.
+tmux_birth new-session -d -s "$SESSION" -x 220 -y 50 \
   "env $ENV_FWD $COMMAND; echo '[dpmux: process exited]'" 2>&1
 
 echo "[dpmux] session '$SESSION' started" >&2

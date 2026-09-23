@@ -18,9 +18,10 @@ restore_env() {
 
 if [[ -f "$ENV_FILE" ]]; then
   cp -p "$ENV_FILE" "$ENV_BACKUP"
-  # Never risk credentials if an idempotent re-install fails partway through.
-  trap restore_env EXIT
 fi
+# Never risk credentials if an idempotent re-install fails partway through.
+# Install is also safe when .env is absent: the trap simply has nothing to do.
+trap restore_env EXIT
 
 make -C "$ROOT" build
 install -m 0755 "$ROOT/bin/relay" "$BIN_DIR/relay"

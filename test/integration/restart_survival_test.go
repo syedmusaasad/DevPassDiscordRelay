@@ -52,7 +52,9 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 		t.Fatalf("seed read-only relay DB: %v", err)
 	}
 	baseEnv := []string{"XDG_DATA_HOME=" + xdg, "TMUX_TMPDIR=" + tmuxTmp, "RELAY_TMUX_BIN=" + tmuxBin, "RELAY_STATE_DIR=" + state, "RELAY_DEVPASS_DB=" + filepath.Join(xdg, "devpass-code", "opencode.db"), "RELAY_DPMUX_BIN=" + dpmuxBin, "RELAY_DEVPASS_BIN=" + fakeBin, "FAKE_DP_FORCE_NEW_SESSION=1", "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001", "DISCORD_API_URL=http://127.0.0.1:" + port}
-	args := []string{"--user", "--unit", unit, "--property=Restart=no", "env"}
+	// --no-block is essential here: without it systemd-run waits for the
+	// long-running relay to exit, so this test never reaches the restart proof.
+	args := []string{"--user", "--no-block", "--unit", unit, "--property=Restart=no", "env"}
 	args = append(args, baseEnv...)
 	args = append(args, "sh", "-c", "exec \"$1\" >\"$2\" 2>&1", "relay-test", relayBin, relayLog)
 	if out, err := exec.Command(systemdRun, args...).CombinedOutput(); err != nil {
