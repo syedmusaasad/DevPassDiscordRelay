@@ -1,0 +1,13 @@
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:50:24 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790718625476-1132" started, target=dp-1790718625476-1132:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.06s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	1.770s

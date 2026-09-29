@@ -1,0 +1,392 @@
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:37 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717017670-1144" started, target=dp-1790717017670-1144:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.07s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:39 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717020510-1191" started, target=dp-1790717020510-1191:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:42 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717023333-1239" started, target=dp-1790717023333-1239:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.06s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:45 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.70s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717026156-1286" started, target=dp-1790717026156-1286:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:48 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717028979-1333" started, target=dp-1790717028979-1333:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:51 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717031793-1381" started, target=dp-1790717031793-1381:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:54 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717034614-1428" started, target=dp-1790717034614-1428:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:56 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717037430-1476" started, target=dp-1790717037430-1476:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.04s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:23:59 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717040240-1523" started, target=dp-1790717040240-1523:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.08s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:02 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717043077-1570" started, target=dp-1790717043077-1570:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:05 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717045901-1617" started, target=dp-1790717045901-1617:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:08 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717048722-1664" started, target=dp-1790717048722-1664:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:10 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717051542-1712" started, target=dp-1790717051542-1712:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:13 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717054375-1759" started, target=dp-1790717054375-1759:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.04s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.08s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:16 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717057204-1806" started, target=dp-1790717057204-1806:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.06s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:19 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.70s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717060039-1853" started, target=dp-1790717060039-1853:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:22 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717062861-1900" started, target=dp-1790717062861-1900:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:25 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717065677-1948" started, target=dp-1790717065677-1948:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:27 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717068509-1995" started, target=dp-1790717068509-1995:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.05s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:30 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.70s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717071313-2042" started, target=dp-1790717071313-2042:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:33 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717074139-2089" started, target=dp-1790717074139-2089:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.08s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:36 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717076978-2136" started, target=dp-1790717076978-2136:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:39 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 601ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.70s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717079798-2183" started, target=dp-1790717079798-2183:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:42 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717082618-2230" started, target=dp-1790717082618-2230:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:44 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.70s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717085438-2277" started, target=dp-1790717085438-2277:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:47 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717088253-2324" started, target=dp-1790717088253-2324:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:50 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717091070-2371" started, target=dp-1790717091070-2371:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:53 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717093883-2419" started, target=dp-1790717093883-2419:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.05s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.07s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:56 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717096701-2466" started, target=dp-1790717096701-2466:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.04s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.05s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/09/29 21:24:58 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790717099504-2513" started, target=dp-1790717099504-2513:0.0
+    dpmux_test.go:107: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (1.04s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	84.651s

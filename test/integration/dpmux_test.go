@@ -38,9 +38,11 @@ for marker in "$RELAY_STATE_DIR"/pending-*; do
   if [ -e "$marker" ]; then marker_found=true; fi
 done
 printf 'marker_found=%%s\n' "$marker_found" > "%s"
+# Diagnostics for a failure (never consulted by the assertion below).
+printf 'state_dir=%%s ls=%%s\n' "$RELAY_STATE_DIR" "$(ls "$RELAY_STATE_DIR" 2>&1 | tr '\n' ' ')" > "%s.diag"
 # Sleep briefly so tmux session stays alive long enough to be useful.
 sleep 1
-`, logFile)
+`, logFile, logFile)
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -77,7 +79,8 @@ sleep 1
 		t.Fatalf("stub did not write log file within 10s (marker check not executed)")
 	}
 	if logContent != "marker_found=true" {
-		t.Fatalf("child started before pending marker existed: %q", logContent)
+		diag, _ := os.ReadFile(logFile + ".diag")
+		t.Fatalf("child started before pending marker existed: %q diag=%q", logContent, diag)
 	}
 	entries, err := os.ReadDir(stateDir)
 	if err != nil {
@@ -131,8 +134,10 @@ for marker in "$RELAY_STATE_DIR"/pending-*; do
   if [ -e "$marker" ]; then marker_found=true; fi
 done
 printf 'marker_found=%%s state_dir=%%s home=%%s\n' "$marker_found" "$RELAY_STATE_DIR" "$HOME" > %s
+# Diagnostics for a failure (never consulted by the assertion below).
+printf 'ls=%%s\n' "$(ls -la "$RELAY_STATE_DIR" 2>&1 | tr '\n' '|')" > %s.diag
 sleep 1
-`, shellQuoteForScript(logFile))
+`, shellQuoteForScript(logFile), shellQuoteForScript(logFile))
 	if err := os.WriteFile(stubScript, []byte(stubContent), 0755); err != nil {
 		t.Fatalf("write stub script: %v", err)
 	}
@@ -170,7 +175,8 @@ sleep 1
 	}
 	wantPrefix := "marker_found=true state_dir=" + stateDir + " home=" + os.Getenv("HOME")
 	if logContent != wantPrefix {
-		t.Fatalf("scope child did not inherit dpmux marker environment: got %q, want %q", logContent, wantPrefix)
+		diag, _ := os.ReadFile(logFile + ".diag")
+		t.Fatalf("scope child did not inherit dpmux marker environment: got %q, want %q diag=%q", logContent, wantPrefix, diag)
 	}
 }
 

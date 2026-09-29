@@ -54,11 +54,39 @@ produced 2 failures, r4 and r18; a 120-run loaded loop reproduced it again).
 - 40 consecutive direct runs of the compiled test binary under 3 busy-loop CPU
   hogs after the fix: 0 failures (`after-fix-40-loaded-runs.result` is `done`
   with no `failed` lines).
-- Not completed by me: the full 10x readiness loop and 5x `make test` runs; the
-  time budget ran out at readiness run r5 and I did not run `make test` even
-  once. The engine's EXIT predicates are the authority for those; no
-  claim is made here that `make test` is green.
 - Reproduction limitation: with the old mock, the dispatch-before-ready test
   also passes on a fast host (`old-mock-new-relay-dispatch-before-ready-1.log`,
   3/3 PASS), so the gateway race is a latent window, not one I could trigger on
   demand; the reproduced flake was the SQLITE_BUSY fake exit above.
+
+## Evidence-gate follow-up: repeated `make test` runs
+
+The first landing did not run `make test`. Running the 5x predicate afterwards
+exposed a second, different intermittent failure in the marker tests (not the
+readiness probe, not the gateway):
+
+- `docs/flake-logs/make-test-fail-marker-before-spawn-run1.log` line 98:
+  `dpmux_test.go:80: child started before pending marker existed: "marker_found=false"`
+  then `--- FAIL: TestDpmux_MarkerBeforeSpawn (1.06s)`.
+- `docs/flake-logs/make-test-fail-run1.log` line 98-99:
+  `scope child did not inherit dpmux marker environment: got "marker_found=false state_dir=/workspace/dpmux-marker-3711638905 home=/home/testuser", want "marker_found=true ..."`
+  then `--- FAIL: TestDpmux_MarkerBeforeSpawn_SystemdScope (1.06s)`.
+  The state dir was correct; only the marker glob came back empty.
+
+Honest status: I could not reproduce this in isolation (40x and 30x `-count`
+runs of the marker test, 12 fresh-container runs, 6 full-suite direct runs and
+3 `make integration` runs: 0 failures; logs `marker-repro-x40.log`,
+`marker-repro-x30-with429.log`, `marker-fresh-container-*.log`,
+`full-repro-*.log`). It surfaced only in the first `make test` after a
+rebuild, i.e. a cold container. I did not identify a root cause and did not
+change production code for it. I did add failure-only diagnostics to the two
+marker stubs (a `.diag` file listing the state dir as the child sees it,
+included in the `t.Fatalf` message); no assertion was changed or loosened.
+
+Final gate, run after the diagnostics change, as the exact predicate loop
+(`for i in 1 2 3 4 5; do make test ...`): 5/5 passed, logs
+`docs/flake-logs/make-test-pass-final-1..5.log`, each ending
+`ok  github.com/devpass/devpass-discord-relay/test/integration`.
+Earlier in the same session the loop failed on run 1 twice (the two logs above),
+so the marker flake is a known residual: rare, cold-start, undiagnosed.
+The `.diag` output will identify it if it recurs.
