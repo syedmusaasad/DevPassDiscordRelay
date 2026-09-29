@@ -69,6 +69,7 @@ func TestRestartSurvival_DisposableUnit(t *testing.T) {
 	// spawn event. Re-dispatching would legitimately create multiple concurrent
 	// fake CLI writers against the same SQLite database.
 	time.Sleep(time.Second)
+	waitForRelayReady(t, state)
 	if err := dispatchEvent(port, buildMessageEvent("restart-spawn", "test-channel-001", "user-allowed-001", false, "restart proof", nil)); err != nil {
 		t.Fatal(err)
 	}

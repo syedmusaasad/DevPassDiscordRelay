@@ -1,0 +1,8 @@
+=== RUN   TestGateway_DispatchBeforeReadyIsDelivered
+2026/09/29 21:08:59 main.go:55: relay: .env load: no .env found in [/tmp/devpass-code/home/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/29 21:08:59 watcher.go:1301: mirror: handleDiscordMessage: channel=thread-before-ready-001 session=ses_gateway_before_ready
+2026/09/29 21:08:59 main.go:132: relay: gateway ready
+2026/09/29 21:08:59 main.go:147: relay: tmux isolation mode: systemd-user-scope
+2026/09/29 21:08:59 main.go:148: relay: starting watcher
+--- PASS: TestGateway_DispatchBeforeReadyIsDelivered (2.63s)
+PASS

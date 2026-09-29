@@ -16,7 +16,9 @@
 //
 // Control endpoints:
 //
-//	POST /control/dispatch      body: {"t":"MESSAGE_CREATE","d":{...}}  — inject gateway event
+//	POST /control/dispatch      body: {"t":"MESSAGE_CREATE","d":{...}}  — inject gateway event;
+//	                            held (bounded, MOCK_DISPATCH_READY_TIMEOUT_MS, default 10s)
+//	                            until a session has sent IDENTIFY and received READY
 //	GET  /control/sent          — return all messages the relay sent (array)
 //	POST /control/ratelimit     body: {"path":"/channels/X/messages","retry_after":1.0,"count":1}
 //	                            count>0 limits how many consecutive requests to
@@ -34,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -69,6 +72,7 @@ type server struct {
 	channels     map[string][]storedMsg // channelID -> messages
 	nextMsgID    int64
 	gwPort       string // gateway WS port (for returning in REST gateway endpoint)
+	readyConns   int    // connections that sent IDENTIFY and were sent READY (guarded by mu)
 }
 
 type storedMsg struct {
@@ -163,6 +167,16 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
+	var ready atomic.Bool
+	readyC := make(chan struct{})
+	defer func() {
+		if ready.Load() {
+			s.mu.Lock()
+			s.readyConns--
+			s.mu.Unlock()
+		}
+	}()
+
 	// Send HELLO
 	hello := gatewayMsg{Op: opHello, D: json.RawMessage(`{"heartbeat_interval":30000}`)}
 	if err := conn.WriteJSON(hello); err != nil {
@@ -198,6 +212,12 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 					"resume_gateway_url": "ws://127.0.0.1:0",
 					"application":        map[string]interface{}{"id": "000000000000000001", "flags": 0},
 				})
+				if ready.CompareAndSwap(false, true) {
+					s.mu.Lock()
+					s.readyConns++
+					s.mu.Unlock()
+					close(readyC)
+				}
 			case opHeartbeat:
 				conn.WriteJSON(gatewayMsg{Op: opHeartbeatAck})
 			}
@@ -207,11 +227,16 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	// Dispatch events to this connection
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()
+	// Events are only consumed by a connection that has completed IDENTIFY/READY.
+	var events <-chan json.RawMessage
 	for {
 		select {
 		case <-readDone:
 			return
-		case ev := <-s.events:
+		case <-readyC:
+			events = s.events
+			readyC = nil
+		case ev := <-events:
 			var raw gatewayMsg
 			if err := json.Unmarshal(ev, &raw); err == nil {
 				seq++
@@ -341,6 +366,27 @@ func (s *server) handleControlDispatch(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Hold the event until a connected gateway session has sent IDENTIFY and
+	// received READY; an event pushed earlier would be consumed by (or lost
+	// to) a connection that is not yet listening.
+	wait := 10 * time.Second
+	if v, err := strconv.Atoi(os.Getenv("MOCK_DISPATCH_READY_TIMEOUT_MS")); err == nil && v > 0 {
+		wait = time.Duration(v) * time.Millisecond
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		s.mu.Lock()
+		n := s.readyConns
+		s.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			http.Error(w, fmt.Sprintf("no gateway session sent IDENTIFY and received READY within %s; event not dispatched", wait), http.StatusServiceUnavailable)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	select {
 	case s.events <- ev:

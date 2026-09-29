@@ -96,7 +96,7 @@ func run(args []string) error {
 	}
 
 	// Open (or create) the DB
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		return fmt.Errorf("fake-devpass-code: open db: %w", err)
 	}

@@ -137,6 +137,7 @@ func TestInvariant3_InjectionEchoVerification(t *testing.T) {
 	//  4. Re-send once. The fake processes the second inject and writes the row.
 	//  5. suppressedEchoes suppresses the second "You: …" from mirrorContent.
 	msgEvent := buildMessageEvent("msg-echo-001", threadID, "user-echo-001", false, "echo verification probe", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, msgEvent); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -414,6 +415,7 @@ echo "$SESSION_NAME"
 	// Dispatch a message to the thread. The pane is dead, so the relay will call
 	// spawnResume → detect refusal (attempt 1) → teardown → spawnResume (attempt 2) → succeed.
 	msgEvent := buildMessageEvent("msg-refusal-001", threadID, "user-refusal-001", false, "refusal retry test prompt", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, msgEvent); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -568,6 +570,7 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 	// The relay finds rec for sessionA (via threadA), calls handleAmbiguousResume,
 	// queries DB → 2 sessions → posts numbered candidate list.
 	resumeEvent := buildMessageEvent("msg-ambig-resume", threadA, "user-ambig-001", false, "!resume", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, resumeEvent); err != nil {
 		t.Fatalf("dispatch !resume: %v", err)
 	}
@@ -600,6 +603,7 @@ func TestInvariant4_AmbiguousIdCandidateList(t *testing.T) {
 	// Reply with `!resume 1` to select the first candidate.
 	clearSentMessages(mockPort)
 	choiceEvent := buildMessageEvent("msg-ambig-choice", threadA, "user-ambig-001", false, "!resume 1", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, choiceEvent); err != nil {
 		t.Fatalf("dispatch !resume 1: %v", err)
 	}

@@ -130,6 +130,7 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 		"invariant1: this is the first prompt",
 		nil,
 	)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, channelMsg); err != nil {
 		t.Fatalf("dispatch channel message: %v", err)
 	}
@@ -274,6 +275,7 @@ func TestSpawn_ChannelMessageTriggersDpmux(t *testing.T) {
 		"please do something useful for me",
 		nil,
 	)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, channelMsg); err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -405,6 +407,7 @@ func TestInvariant1_ConcurrentForeignSessionRejected(t *testing.T) {
 		"invariant1c: this is the first prompt",
 		nil,
 	)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, channelMsg); err != nil {
 		t.Fatalf("dispatch channel message: %v", err)
 	}
@@ -604,6 +607,7 @@ func TestInvariant1_MissingIdentityFailsClosed(t *testing.T) {
 		"invariant1m: should never be injected",
 		nil,
 	)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, channelMsg); err != nil {
 		t.Fatalf("dispatch channel message: %v", err)
 	}

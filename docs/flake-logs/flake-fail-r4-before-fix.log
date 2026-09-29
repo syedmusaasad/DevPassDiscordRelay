@@ -1,0 +1,5 @@
+=== RUN   TestInject_ReadinessProbe
+    inject_test.go:114: thread created: id=2
+    inject_test.go:139: injected prompt not found in DB: user prompt "hello from discord" not found in DB for session ses_inject_rp001 after 20s
+--- FAIL: TestInject_ReadinessProbe (21.47s)
+FAIL

@@ -120,15 +120,29 @@ func runRelay(ctx context.Context) error {
 		return fmt.Errorf("watcher: %w", err)
 	}
 
-	// Open gateway connection to receive MESSAGE_CREATE events.
-	// A failure here is non-fatal: the relay can still mirror sessions to Discord
-	// (outgoing direction works without a gateway connection); only incoming
-	// Discord-to-pane injection will be unavailable until the gateway reconnects.
-	if err := dc.s.Open(); err != nil {
-		log.Printf("relay: discord gateway open: %v (continuing without inbound events)", err)
-	} else {
-		defer dc.s.Close()
+	// Gateway readiness: the ready file under the state dir is written on the
+	// gateway READY event and removed on disconnect, so tests and operators can
+	// observe whether inbound events will be consumed.
+	readyPath := filepath.Join(stateDir, gatewayReadyFile)
+	_ = os.Remove(readyPath)
+	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) {
+		if err := os.WriteFile(readyPath, []byte(strconv.FormatInt(time.Now().UnixMilli(), 10)+"\n"), 0644); err != nil {
+			log.Printf("relay: write ready file: %v", err)
+		}
+		log.Printf("relay: gateway ready")
+	})
+	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) {
+		_ = os.Remove(readyPath)
+		log.Printf("relay: gateway disconnected")
+	})
+
+	// Open the gateway connection to receive MESSAGE_CREATE / INTERACTION_CREATE.
+	// A failed Open is retried with backoff; if it never succeeds the relay exits
+	// non-zero rather than running deaf to inbound events.
+	if err := openGateway(ctx, dc.s.Open); err != nil {
+		return fmt.Errorf("discord gateway open: %w", err)
 	}
+	defer dc.s.Close()
 
 	log.Printf("relay: tmux isolation mode: %s", tmuxctl.IsolationMode())
 	log.Println("relay: starting watcher")
@@ -138,6 +152,29 @@ func runRelay(ctx context.Context) error {
 }
 
 const relayVersion = "dev"
+
+// gatewayReadyFile is written under RELAY_STATE_DIR when the gateway is READY.
+const gatewayReadyFile = "gateway-ready"
+
+// openGateway calls open, retrying with backoff; returns the last error if
+// every attempt fails or ctx is cancelled.
+func openGateway(ctx context.Context, open func() error) error {
+	var err error
+	backoff := 500 * time.Millisecond
+	for attempt := 1; attempt <= 6; attempt++ {
+		if err = open(); err == nil {
+			return nil
+		}
+		log.Printf("relay: discord gateway open attempt %d failed: %v", attempt, err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+	return err
+}
 
 // ── Discord client adapter ─────────────────────────────────────────────────────
 

@@ -1,0 +1,88 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-09-29T21:09:52Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB 0.0s done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test internal] load build context
+#4 DONE 0.0s
+
+#5 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#5 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#5 DONE 0.0s
+
+#4 [test internal] load build context
+#4 transferring context: 29.41MB 0.4s done
+#4 DONE 0.4s
+
+#6 [test  3/11] RUN mkdir -p /run/systemd/system
+#6 CACHED
+
+#7 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#8 CACHED
+
+#9 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#9 CACHED
+
+#10 [test  6/11] WORKDIR /workspace
+#10 CACHED
+
+#11 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.2s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.4s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 61.0s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 6.9s done
+#16 exporting manifest sha256:88da5c5e72680f6cea240bdd57e1d28da4ee9e5a58bcf0415919c0341ddcde4d 0.0s done
+#16 exporting config sha256:ea011e38f6bac2bd6cbf7ff3c3dd163282d2178f50dce0d62d977155da7728cf 0.0s done
+#16 exporting attestation manifest sha256:b21359c85904d587cf148d2d342bc7659d2c1292d9d481044827070fc97988e2 0.0s done
+#16 exporting manifest list sha256:6e77cdd4c6e6fe7cef9ffb6ee1ffea8c796ff9b94e065cd35a1883cebd9cae6e 0.0s done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 4.1s done
+#16 DONE 11.1s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestGateway_DispatchBeforeReadyIsDelivered
+2026/09/29 21:11:24 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/29 21:11:24 main.go:132: relay: gateway ready
+2026/09/29 21:11:24 main.go:147: relay: tmux isolation mode: systemd-user-scope
+2026/09/29 21:11:24 main.go:148: relay: starting watcher
+2026/09/29 21:11:24 watcher.go:1301: mirror: handleDiscordMessage: channel=thread-before-ready-001 session=ses_gateway_before_ready
+--- PASS: TestGateway_DispatchBeforeReadyIsDelivered (2.73s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	2.731s

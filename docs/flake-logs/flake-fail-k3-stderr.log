@@ -1,0 +1,11 @@
+=== RUN   TestInject_ReadinessProbe
+2026/09/29 21:03:19 main.go:55: relay: .env load: no .env found in [/tmp/devpass-code/home/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/09/29 21:03:19 main.go:133: relay: tmux isolation mode: systemd-user-scope
+2026/09/29 21:03:19 main.go:134: relay: starting watcher
+2026/09/29 21:03:20 watcher.go:513: mirror: attaching session ses_inject_rp001 target=dp-inject-rp:0.0
+    inject_test.go:114: thread created: id=2
+2026/09/29 21:03:20 watcher.go:1301: mirror: handleDiscordMessage: channel=2 session=ses_inject_rp001
+2026/09/29 21:03:25 watcher.go:634: mirror: tmux pane dp-inject-rp:0.0 died
+    inject_test.go:139: injected prompt not found in DB: user prompt "hello from discord" not found in DB for session ses_inject_rp001 after 20s
+--- FAIL: TestInject_ReadinessProbe (21.49s)
+FAIL

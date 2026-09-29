@@ -123,6 +123,7 @@ func TestInject_ReadinessProbe(t *testing.T) {
 
 	// Dispatch a MESSAGE_CREATE to the thread from the allowed user.
 	msgEvent := buildMessageEvent("msg-dispatch-001", threadID, "user-allowed-001", false, "hello from discord", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, msgEvent); err != nil {
 		t.Fatalf("dispatch event: %v", err)
 	}
@@ -238,12 +239,14 @@ func TestInject_ForeignAuthorDropped(t *testing.T) {
 
 	// Dispatch a message from a bot — should be dropped.
 	botEvent := buildMessageEvent("msg-bot-001", threadID, "bot-user-999", true, "I am a bot", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, botEvent); err != nil {
 		t.Fatalf("dispatch bot event: %v", err)
 	}
 
 	// Dispatch a message from a non-allowed user — should be dropped.
 	foreignEvent := buildMessageEvent("msg-foreign-001", threadID, "user-foreign-999", false, "I am an outsider", nil)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, foreignEvent); err != nil {
 		t.Fatalf("dispatch foreign event: %v", err)
 	}
@@ -446,6 +449,7 @@ func testInteractionApproval(t *testing.T, action, want, absent string) {
 		componentID = waitForComponentIDAt(t, mockPort, "Permission required", 1, 10*time.Second)
 	}
 	interaction := map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{"id": "interaction-" + action + "-001", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2", "member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001", "bot": false}}, "data": map[string]interface{}{"custom_id": componentID, "component_type": 2}}}
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, interaction); err != nil {
 		t.Fatal(err)
 	}
@@ -505,6 +509,7 @@ func TestApproval_SecondPromptGetsButtons(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = relay.Process.Kill() })
 	first := waitForComponentID(t, mockPort, "Permission required", 10*time.Second)
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, map[string]interface{}{"t": "INTERACTION_CREATE", "d": map[string]interface{}{"id": "second-first", "application_id": "app", "type": 3, "token": "token", "version": 1, "channel_id": "2", "member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001"}}, "data": map[string]interface{}{"custom_id": first, "component_type": 2}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -664,6 +669,7 @@ func TestQuestionPicker_MenuSelection(t *testing.T) {
 		"member": map[string]interface{}{"user": map[string]interface{}{"id": "user-allowed-001", "bot": false}},
 		"data":   map[string]interface{}{"custom_id": questionID, "component_type": 3, "values": []string{"1"}},
 	}}
+	waitForRelayReady(t, stateDir)
 	if err := dispatchEvent(mockPort, interaction); err != nil {
 		t.Fatal(err)
 	}
@@ -798,4 +804,116 @@ func waitForSessionRecord(stateDir, sessionID string, timeout time.Duration) err
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("session %s not present in %s after %s", sessionID, path, timeout)
+}
+
+// waitForRelayReady blocks until the relay has written its gateway-ready file
+// (written on the gateway READY event). Every test that dispatches gateway
+// events must call it first; it is the single shared readiness wait.
+func waitForRelayReady(t *testing.T, stateDir string) {
+	t.Helper()
+	path := filepath.Join(stateDir, "gateway-ready")
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("relay gateway not ready: %s absent after 15s", path)
+}
+
+// TestGateway_DispatchBeforeReadyIsDelivered dispatches a gateway event
+// immediately after the relay process starts, before its gateway has completed
+// IDENTIFY/READY. mock-discord must hold the event until a READY session
+// exists, and the relay must then handle it exactly once.
+func TestGateway_DispatchBeforeReadyIsDelivered(t *testing.T) {
+	mustBin(t, "tmux")
+	fakeDP := mustBin(t, "fake-devpass-code")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+
+	xdgHome, stateDir := t.TempDir(), t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+	mockPort, mockGWPort := "19930", "19931"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyTestSchema(db); err != nil {
+		t.Fatalf("schema: %v", err)
+	}
+	sessionID := "ses_gateway_before_ready"
+	now := time.Now().UnixMilli()
+	insertTestSession(t, db, sessionID, now)
+	db.Close()
+
+	sessionName := "dp-gateway-dbr"
+	t.Cleanup(func() { exec.Command("tmux", "kill-session", "-t", sessionName).Run() })
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-x", "200", "-y", "50",
+		"env", "XDG_DATA_HOME="+xdgHome, fakeDP, "--auto").CombinedOutput(); err != nil {
+		t.Fatalf("start fake-devpass-code tmux: %v\n%s", err, out)
+	}
+	paneTarget := sessionName + ":0.0"
+	if err := waitForPaneText(t, paneTarget, "Ask anything", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	pendingPath := filepath.Join(stateDir, "pending-"+sessionName)
+	if err := os.WriteFile(pendingPath, knownSessionMarker(paneTarget, sessionID), 0644); err != nil {
+		t.Fatal(err)
+	}
+	markerTime := time.UnixMilli(now - 1000)
+	os.Chtimes(pendingPath, markerTime, markerTime)
+
+	// Pre-seed the claimed thread so the event has a handler target without
+	// waiting on the relay: the only thing under test is gateway delivery.
+	const threadID = "thread-before-ready-001"
+	sessionsJSON := fmt.Sprintf(`[{"session_id":%q,"tmux_target":%q,"thread_id":%q,"thread_root_id":"root-dbr-001","channel_id":"test-channel-001","status":"active"}]`,
+		sessionID, paneTarget, threadID)
+	if err := os.WriteFile(filepath.Join(stateDir, "sessions.json"), []byte(sessionsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	relayCmd := exec.Command(relayBin)
+	relayCmd.Env = append(os.Environ(),
+		"DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001", "DISCORD_USER_ID=user-allowed-001",
+		"DISCORD_API_URL=http://127.0.0.1:"+mockPort, "RELAY_DEVPASS_DB="+dbPath, "RELAY_STATE_DIR="+stateDir)
+	relayCmd.Stdout, relayCmd.Stderr = io.Discard, os.Stderr
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill() })
+
+	// Deliberately NO waitForRelayReady: dispatch races the relay's handshake.
+	// Precondition: the relay is not yet ready at the instant of dispatch is
+	// best-effort (a fast host may finish READY first); delivery must hold
+	// either way.
+	ev := buildMessageEvent("msg-dbr-001", threadID, "user-allowed-001", false, "before ready hello", nil)
+	if err := dispatchEvent(mockPort, ev); err != nil {
+		t.Fatalf("dispatch before ready: %v", err)
+	}
+
+	db2, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	if err := waitForUserPrompt(t, db2, sessionID, "before ready hello", 20*time.Second); err != nil {
+		t.Fatalf("event dispatched before READY was not handled: %v", err)
+	}
+	// Exactly once: allow any erroneous duplicate delivery/injection to settle.
+	time.Sleep(2 * time.Second)
+	var count int
+	db2.QueryRow(`SELECT COUNT(*) FROM part WHERE session_id = ? AND data LIKE ?`,
+		sessionID, `%before ready hello%`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("expected event handled exactly once; got %d occurrences", count)
+	}
+	waitForRelayReady(t, stateDir)
 }
