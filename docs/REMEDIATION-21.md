@@ -47,3 +47,13 @@ The commands below were run consecutively after the fixes.
 1. `make test > /tmp/p21-t1.log 2>&1` — PASS
 2. `make test > /tmp/p21-t2.log 2>&1` — PASS
 3. `make test > /tmp/p21-t3.log 2>&1` — PASS
+
+## Update after phase 22 (readiness supersession)
+
+The readiness-probe fix above (waiting for `sessions.json`) was later found
+insufficient: the test could still dispatch a gateway event before the relay
+had an IDENTIFY/READY consumer. Phase 22 (commits after 5e40049) replaced it
+with a relay-exposed gateway readiness signal and a mock-discord that holds
+dispatches until a session is READY; see docs/REMEDIATION-22.md for the
+authoritative root cause and evidence. The marker-under-scope and strict
+restart fixes from 5e40049 are unchanged.
