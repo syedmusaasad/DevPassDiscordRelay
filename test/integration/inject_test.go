@@ -823,9 +823,11 @@ func waitForRelayReady(t *testing.T, stateDir string) {
 }
 
 // TestGateway_DispatchBeforeReadyIsDelivered dispatches a gateway event
-// immediately after the relay process starts, before its gateway has completed
-// IDENTIFY/READY. mock-discord must hold the event until a READY session
-// exists, and the relay must then handle it exactly once.
+// immediately after the relay process starts, while its gateway handshake is
+// provably incomplete: mock-discord delays READY by MOCK_READY_DELAY_MS, and the
+// test fails hard if the relay's gateway-ready file already exists when the
+// dispatch is issued. mock-discord must hold the event until a READY session
+// is consuming, and the relay must then handle it exactly once.
 func TestGateway_DispatchBeforeReadyIsDelivered(t *testing.T) {
 	mustBin(t, "tmux")
 	fakeDP := mustBin(t, "fake-devpass-code")
@@ -835,6 +837,7 @@ func TestGateway_DispatchBeforeReadyIsDelivered(t *testing.T) {
 	xdgHome, stateDir := t.TempDir(), t.TempDir()
 	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
 	mockPort, mockGWPort := "19930", "19931"
+	t.Setenv("MOCK_READY_DELAY_MS", "1500") // inherited by mock-discord only via startMockDiscord's os.Environ
 	startMockDiscord(t, mockDS, mockPort, mockGWPort)
 	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
 		t.Fatalf("mock-discord not ready: %v", err)
@@ -891,12 +894,33 @@ func TestGateway_DispatchBeforeReadyIsDelivered(t *testing.T) {
 	t.Cleanup(func() { relayCmd.Process.Kill() })
 
 	// Deliberately NO waitForRelayReady: dispatch races the relay's handshake.
-	// Precondition: the relay is not yet ready at the instant of dispatch is
-	// best-effort (a fast host may finish READY first); delivery must hold
-	// either way.
+	// mock-discord holds READY back for 1.5s after IDENTIFY, so the relay cannot
+	// be ready when this dispatch is issued; assert that precondition instead of
+	// assuming it. The dispatch itself is held by the mock until READY, so it
+	// runs in a goroutine and its result is collected below.
+	readyFile := filepath.Join(stateDir, "gateway-ready")
 	ev := buildMessageEvent("msg-dbr-001", threadID, "user-allowed-001", false, "before ready hello", nil)
-	if err := dispatchEvent(mockPort, ev); err != nil {
-		t.Fatalf("dispatch before ready: %v", err)
+	dispatchErr := make(chan error, 1)
+	go func() { dispatchErr <- dispatchEvent(mockPort, ev) }()
+	if _, err := os.Stat(readyFile); err == nil {
+		t.Fatalf("precondition violated: relay gateway already ready at dispatch time (%s exists)", readyFile)
+	}
+	select {
+	case err := <-dispatchErr:
+		t.Fatalf("dispatch returned before the gateway was READY (err=%v); mock did not hold it", err)
+	case <-time.After(300 * time.Millisecond):
+		// still held: no READY session yet
+	}
+	if _, err := os.Stat(readyFile); err == nil {
+		t.Fatalf("precondition violated: relay became ready within 300ms of dispatch despite MOCK_READY_DELAY_MS")
+	}
+	select {
+	case err := <-dispatchErr:
+		if err != nil {
+			t.Fatalf("dispatch before ready: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("held dispatch never released after READY")
 	}
 
 	db2, err := sql.Open("sqlite", dbPath)
@@ -910,10 +934,28 @@ func TestGateway_DispatchBeforeReadyIsDelivered(t *testing.T) {
 	// Exactly once: allow any erroneous duplicate delivery/injection to settle.
 	time.Sleep(2 * time.Second)
 	var count int
-	db2.QueryRow(`SELECT COUNT(*) FROM part WHERE session_id = ? AND data LIKE ?`,
-		sessionID, `%before ready hello%`).Scan(&count)
+	if err := db2.QueryRow(`SELECT COUNT(*) FROM part WHERE session_id = ? AND data LIKE ?`,
+		sessionID, `%before ready hello%`).Scan(&count); err != nil {
+		t.Fatalf("count deliveries: %v", err)
+	}
 	if count != 1 {
 		t.Fatalf("expected event handled exactly once; got %d occurrences", count)
 	}
 	waitForRelayReady(t, stateDir)
+}
+
+// TestGateway_DispatchWithoutSessionFailsClearly: with no relay connected, the
+// mock must not silently queue the event; it fails with an explicit error.
+func TestGateway_DispatchWithoutSessionFailsClearly(t *testing.T) {
+	mockDS := mustBin(t, "mock-discord")
+	t.Setenv("MOCK_DISPATCH_READY_TIMEOUT_MS", "300")
+	mockPort, mockGWPort := "19932", "19933"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+	err := dispatchEvent(mockPort, buildMessageEvent("msg-nosession", "t", "u", false, "x", nil))
+	if err == nil || !strings.Contains(err.Error(), "no gateway session sent IDENTIFY and received READY") {
+		t.Fatalf("expected explicit no-READY-session error, got %v", err)
+	}
 }

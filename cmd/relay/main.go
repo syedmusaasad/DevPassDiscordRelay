@@ -125,12 +125,16 @@ func runRelay(ctx context.Context) error {
 	// observe whether inbound events will be consumed.
 	readyPath := filepath.Join(stateDir, gatewayReadyFile)
 	_ = os.Remove(readyPath)
-	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) {
+	markReady := func(event string) {
 		if err := os.WriteFile(readyPath, []byte(strconv.FormatInt(time.Now().UnixMilli(), 10)+"\n"), 0644); err != nil {
 			log.Printf("relay: write ready file: %v", err)
 		}
-		log.Printf("relay: gateway ready")
-	})
+		log.Printf("relay: gateway ready (%s)", event)
+	}
+	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) { markReady("READY") })
+	// discordgo reconnects on its own after a dropped connection and RESUMEs;
+	// the ready file must come back when inbound events flow again.
+	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { markReady("RESUMED") })
 	dc.s.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) {
 		_ = os.Remove(readyPath)
 		log.Printf("relay: gateway disconnected")

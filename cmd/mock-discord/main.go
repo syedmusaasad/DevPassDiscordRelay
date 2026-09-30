@@ -18,7 +18,9 @@
 //
 //	POST /control/dispatch      body: {"t":"MESSAGE_CREATE","d":{...}}  — inject gateway event;
 //	                            held (bounded, MOCK_DISPATCH_READY_TIMEOUT_MS, default 10s)
-//	                            until a session has sent IDENTIFY and received READY
+//	                            until a session has sent IDENTIFY, received READY and
+//	                            begun heartbeating (its listen loop is running)
+//	MOCK_READY_DELAY_MS         optional delay between IDENTIFY and READY (tests)
 //	GET  /control/sent          — return all messages the relay sent (array)
 //	POST /control/ratelimit     body: {"path":"/channels/X/messages","retry_after":1.0,"count":1}
 //	                            count>0 limits how many consecutive requests to
@@ -196,6 +198,7 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
+		identified := false // READY sent; owned by this goroutine
 		for {
 			var msg gatewayMsg
 			if err := conn.ReadJSON(&msg); err != nil {
@@ -203,6 +206,10 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 			}
 			switch msg.Op {
 			case opIdentify:
+				// Optional handshake delay so a test can dispatch strictly before READY.
+				if v, err := strconv.Atoi(os.Getenv("MOCK_READY_DELAY_MS")); err == nil && v > 0 {
+					time.Sleep(time.Duration(v) * time.Millisecond)
+				}
 				// Send READY
 				dispatch("READY", map[string]interface{}{
 					"v":                  10,
@@ -212,14 +219,19 @@ func (s *server) handleGateway(w http.ResponseWriter, r *http.Request) {
 					"resume_gateway_url": "ws://127.0.0.1:0",
 					"application":        map[string]interface{}{"id": "000000000000000001", "flags": 0},
 				})
-				if ready.CompareAndSwap(false, true) {
+				identified = true
+			case opHeartbeat:
+				conn.WriteJSON(gatewayMsg{Op: opHeartbeatAck})
+				// discordgo starts its heartbeat and listen goroutines together
+				// right after Open() has consumed READY, so the first heartbeat
+				// after READY proves the client is past its handshake and about
+				// to consume events. Only then is the session counted as ready.
+				if identified && ready.CompareAndSwap(false, true) {
 					s.mu.Lock()
 					s.readyConns++
 					s.mu.Unlock()
 					close(readyC)
 				}
-			case opHeartbeat:
-				conn.WriteJSON(gatewayMsg{Op: opHeartbeatAck})
 			}
 		}
 	}()

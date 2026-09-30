@@ -1,0 +1,11 @@
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790722927370-1137" started, target=dp-1790722927370-1137:0.0
+    dpmux_test.go:94: stub glob trace:  hit:/workspace/dpmux-marker-2270999103/pending-dp-1790722927370-1137
+    dpmux_test.go:95: stub entry snapshot: t_enter=1790722928931290166 enter_ls=total 12|drwx------ 2 testuser testuser 4096 2026-09-29 23:02:08.928614350 +0000 .|drwxr-xr-x 1 testuser testuser 4096 2026-09-29 23:02:07.367604694 +0000 ..|-rw-r--r-- 1 testuser testuser  192 2026-09-29 23:02:08.891614121 +0000 pending-dp-1790722927370-1137|-rw-r--r-- 1 testuser testuser    0 2026-09-29 23:02:08.928614350 +0000 stderr-dp-1790722927370-1137.log|
+    dpmux_test.go:96: child started before pending marker existed: "marker_found=false" diag="state_dir=/workspace/dpmux-marker-2270999103 ls=pending-dp-1790722927370-1137 stderr-dp-1790722927370-1137.log  t=1790722928935261880 mnt=mnt:[4026532498] pid=1168 ppid=1164\nlater_ls=pending-dp-1790722927370-1137 stderr-dp-1790722927370-1137.log  mnt_self=0\n" test_side_ls="total 12\ndrwx------ 2 testuser testuser 4096 2026-09-29 23:02:08.928614350 +0000 .\ndrwxr-xr-x 1 testuser testuser 4096 2026-09-29 23:02:07.367604694 +0000 ..\n-rw-r--r-- 1 testuser testuser  192 2026-09-29 23:02:08.891614121 +0000 pending-dp-1790722927370-1137\n-rw-r--r-- 1 testuser testuser    0 2026-09-29 23:02:08.928614350 +0000 stderr-dp-1790722927370-1137.log\n"
+--- FAIL: TestDpmux_MarkerBeforeSpawn (2.57s)
+FAIL
+FAIL	github.com/devpass/devpass-discord-relay/test/integration	2.576s
+FAIL
+

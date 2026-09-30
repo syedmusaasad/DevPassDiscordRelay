@@ -1,0 +1,90 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-09-30T14:20:26Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.27MB 0.1s done
+#5 DONE 0.1s
+
+#6 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#6 CACHED
+
+#7 [test  3/11] RUN mkdir -p /run/systemd/system
+#7 CACHED
+
+#8 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#8 CACHED
+
+#9 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#9 CACHED
+
+#10 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#10 CACHED
+
+#11 [test  6/11] WORKDIR /workspace
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.1s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.1s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 35.5s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 7.4s done
+#16 exporting manifest sha256:b7f12a8c88482cc065997dda9abe8fc7272d497a91a616ddb085f4e40b24a68c done
+#16 exporting config sha256:d279c19a66edde4e9bd2ecf80cebbddd82eb2cc6caf206fdb3dceeeeb4855a58 done
+#16 exporting attestation manifest sha256:24a79627d4e2f9099f4ae375996d980ecf1ffc3a6cbf5b1cc2b994d943126c30 done
+#16 exporting manifest list sha256:043baa016809f4930eb1c283aa30f16a38186b8cf49b96889365190442de06e8 done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 1.4s done
+#16 DONE 8.9s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790778084930-1128" started, target=dp-1790778084930-1128:0.0
+    dpmux_test.go:110: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (0.09s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (0.08s)
+=== RUN   TestDpmux_NewWindowMarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1790778085112-1177" started, target=test-nw-host-1790778085093:=dp-1790778085112-1177
+    dpmux_test.go:257: dpmux stdout: "dp-1790778085112-1177\n"
+    dpmux_test.go:291: ✓ pending marker preceded devpass-code startup on new-window path
+--- PASS: TestDpmux_NewWindowMarkerBeforeSpawn (0.10s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	0.273s

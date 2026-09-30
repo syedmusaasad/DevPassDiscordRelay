@@ -1,0 +1,82 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-09-30T14:01:42Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.27MB 0.2s done
+#5 DONE 0.2s
+
+#6 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#6 CACHED
+
+#7 [test  6/11] WORKDIR /workspace
+#7 CACHED
+
+#8 [test  3/11] RUN mkdir -p /run/systemd/system
+#8 CACHED
+
+#9 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#10 CACHED
+
+#11 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.1s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.2s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 35.2s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 5.6s done
+#16 exporting manifest sha256:859894590cb3bd44d47fa2660f882166f2ff5853bbe9ef2cce2995a62464e3e4 done
+#16 exporting config sha256:a7747a43c85f68045d3e232c09b22fa8af951e52aa5fe812ee3ba42f096e338b done
+#16 exporting attestation manifest sha256:ad5d129208961261748aa45c8e410a28cbccd4c4236aa05926045ba7a4695cb1 done
+#16 exporting manifest list sha256:92ffb2791a40021f8635de4a36c2d1a112bd2c5462d2a90eae9da3e017a63251 done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 1.3s done
+#16 DONE 6.9s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestInject_ReadinessProbe
+    inject_test.go:114: thread created: id=2
+    inject_test.go:142: ✓ readiness probe: prompt landed in DB
+    inject_test.go:153: ✓ prompt landed exactly once (1 occurrences)
+--- PASS: TestInject_ReadinessProbe (3.45s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	3.456s
