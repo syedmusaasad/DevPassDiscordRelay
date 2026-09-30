@@ -57,3 +57,14 @@ with a relay-exposed gateway readiness signal and a mock-discord that holds
 dispatches until a session is READY; see docs/REMEDIATION-22.md for the
 authoritative root cause and evidence. The marker-under-scope and strict
 restart fixes from 5e40049 are unchanged.
+
+## Re-verification addendum: TestDpmux_NewWindowMarkerBeforeSpawn host-session flake
+
+Root cause: the test called `tmux -L default kill-server` and immediately ran
+`new-session`. kill-server returns before the old server process has exited, so
+new-session occasionally failed with "server exited unexpectedly" (seen once in
+the first re-verification run, 0.01s). Fix: after kill-server the test now waits
+(bounded, fatal on expiry) until no server answers `list-sessions` on the socket
+before creating the host session. No assertion was loosened and no timeout on
+the marker check was raised. After the fix the three marker tests passed in 5
+consecutive `make integration` runs.

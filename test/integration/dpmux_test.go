@@ -202,7 +202,17 @@ func TestDpmux_NewWindowMarkerBeforeSpawn(t *testing.T) {
 
 	// Create a host tmux session on the default socket.
 	// Ensure a previous short-lived test server cannot leave a stale socket.
+	// kill-server returns before the server process has fully exited; a
+	// new-session issued in that window dies with "server exited unexpectedly".
+	// Wait until no server answers on the socket before creating the host.
 	_ = exec.Command("tmux", "-L", "default", "kill-server").Run()
+	goneDeadline := time.Now().Add(10 * time.Second)
+	for exec.Command("tmux", "-L", "default", "list-sessions").Run() == nil {
+		if time.Now().After(goneDeadline) {
+			t.Fatalf("stale default tmux server did not exit after kill-server")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 	hostSession := fmt.Sprintf("test-nw-host-%d", time.Now().UnixMilli())
 	startCmd := exec.Command("tmux", "-L", "default", "new-session", "-d", "-s", hostSession,
 		"-x", "220", "-y", "50", "sleep 60")
