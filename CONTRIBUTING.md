@@ -31,7 +31,7 @@ All automated tests adhere to strict environment isolation boundaries:
 
 The `cmd/fake-devpass-code` binary replicates `devpass-code` version 1.18.11 behavior for deterministic testing. Control its behavior using the following environment variables:
 
-- `FAKE_DP_REFUSE_FIRST_RESUME=1`: Forces refusal on the first `--session` resume attempt, returning `Error: Session not found`.
+- `FAKE_DP_REFUSE_FIRST_RESUME=1`: Refuses every `--session` launch while it stays set, returning `Error: Session not found`. Tests emulate a one-time failure by removing it from the environment between launches.
 - `FAKE_DP_READY_DELAY_MS=<n>`: Delays displaying the `Ask anything...` ready signature by the specified milliseconds.
 - `FAKE_DP_TRANSCRIPT_DELAY_MS=<n>`: Delays inserting the session database row by the specified milliseconds.
 - `FAKE_DP_SWALLOW_UNTIL_READY=1`: Drops keystrokes received before the prompt reaches readiness.

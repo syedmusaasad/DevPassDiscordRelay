@@ -68,7 +68,8 @@ func runUpdate() error {
 		return err
 	}
 	// Releases are pinned by the latest tag, not the checkout's current branch.
-	commands := [][]string{{"fetch", "--tags"}, {"checkout", "--detach", "latest"}}
+	// --force lets a moved remote latest tag replace the local one.
+	commands := [][]string{{"fetch", "--tags", "--force"}, {"checkout", "--detach", "latest"}}
 	for _, args := range commands {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = root
@@ -106,10 +107,47 @@ func installUpdatedBinaries(root string) error {
 		if err != nil {
 			return fmt.Errorf("read rebuilt %s: %w", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(destDir, name), data, 0755); err != nil {
+		if err := replaceFile(filepath.Join(destDir, name), data, 0755); err != nil {
 			return fmt.Errorf("install rebuilt %s: %w", name, err)
 		}
 	}
+	return nil
+}
+
+// replaceFile writes data to a temp file in dest's directory, chmods it and
+// renames it over dest. Rename swaps the directory entry instead of opening the
+// old inode for writing, so replacing a binary that is currently running does
+// not fail with ETXTBSY and running processes keep their old inode.
+func replaceFile(dest string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".new-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return err
+	}
+	ok = true
 	return nil
 }
 

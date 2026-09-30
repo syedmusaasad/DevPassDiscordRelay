@@ -7,6 +7,8 @@ Wants=network-online.target
 Type=simple
 Environment=HOME=%h
 Environment=XDG_DATA_HOME=%h/.local/share
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=RELAY_DPMUX_BIN=%h/.local/bin/dpmux
 EnvironmentFile=-%h/.config/devpass-discord-relay/.env
 ExecStart=%h/.local/bin/relay
 Restart=on-failure

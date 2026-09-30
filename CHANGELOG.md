@@ -19,7 +19,7 @@ Initial release delivering the six core milestones.
 
 - Injects replies from Discord threads into active tmux panes using `tmux send-keys`.
 - Verifies pane readiness against the `Ask anything...` signature before keystroke delivery.
-- Enforces single-user authorization checks against `DISCORD_USER_ID`.
+- Enforces single-user authorization against `DISCORD_USER_ID`; the relay refuses to start when it is unset or empty.
 - Drops unauthorized user and bot dispatches at the gateway event boundary.
 - Supports thread title renaming from Discord.
 - Downloads attached images to local staging directories and appends paths to prompts.
@@ -53,4 +53,4 @@ Initial release delivering the six core milestones.
 - Preserves active tmux windows across relay restarts and daemon upgrades.
 - Sweeps stale inactive records in `sessions.json` based on configurable retention limits.
 - Delivers idempotent `install.sh` installer configuring local binaries and systemd user services.
-- Sends minimal anonymous telemetry pings upon daemon launch.
+- Optional telemetry: off unless `TELEMETRY_URL` is set; when set, at most one POST per UTC day from a running relay (not only at startup) carrying `sha256(username)[:12]` and the version. The digest is pseudonymous, not anonymous.

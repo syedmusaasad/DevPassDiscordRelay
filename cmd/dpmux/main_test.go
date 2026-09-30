@@ -31,7 +31,14 @@ func TestUpdateSourceUsesInstallMarker(t *testing.T) {
 	}
 }
 
-func TestDpmuxUpdate_ChecksOutLatestTag(t *testing.T) {
+// updateRepo is a temp remote plus a clone registered as HOME's install source.
+type updateRepo struct {
+	home, seed, checkout string
+	latest               string // commit the latest tag initially points at
+}
+
+func newUpdateRepo(t *testing.T) *updateRepo {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	bare := filepath.Join(t.TempDir(), "remote.git")
@@ -61,12 +68,106 @@ func TestDpmuxUpdate_ChecksOutLatestTag(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", updateTestPath(t))
+	return &updateRepo{home: home, seed: seed, checkout: checkout, latest: latest}
+}
 
+func TestDpmuxUpdate_ChecksOutLatestTag(t *testing.T) {
+	r := newUpdateRepo(t)
 	if err := runUpdate(); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.TrimSpace(runGitAt(t, checkout, "rev-parse", "HEAD")); got != latest {
-		t.Fatalf("HEAD after update = %s, want latest tag commit %s", got, latest)
+	if got := strings.TrimSpace(runGitAt(t, r.checkout, "rev-parse", "HEAD")); got != r.latest {
+		t.Fatalf("HEAD after update = %s, want latest tag commit %s", got, r.latest)
+	}
+}
+
+// TestDpmuxUpdate_FollowsMovedLatestTag moves the latest tag in the remote after
+// the clone already holds the old tag; a plain `git fetch --tags` would keep it.
+func TestDpmuxUpdate_FollowsMovedLatestTag(t *testing.T) {
+	r := newUpdateRepo(t)
+	if err := runUpdate(); err != nil {
+		t.Fatal(err)
+	}
+	writeUpdateFixture(t, r.seed, "moved")
+	runGitAt(t, r.seed, "add", ".")
+	runGitAt(t, r.seed, "commit", "-m", "moved release")
+	moved := strings.TrimSpace(runGitAt(t, r.seed, "rev-parse", "HEAD"))
+	if moved == r.latest {
+		t.Fatal("test setup: moved commit equals original")
+	}
+	runGitAt(t, r.seed, "tag", "-f", "latest")
+	runGitAt(t, r.seed, "push", "--force", "origin", "HEAD:master", "refs/tags/latest")
+
+	if err := runUpdate(); err != nil {
+		t.Fatalf("update after tag moved: %v", err)
+	}
+	if got := strings.TrimSpace(runGitAt(t, r.checkout, "rev-parse", "HEAD")); got != moved {
+		t.Fatalf("HEAD after update = %s, want moved latest tag commit %s", got, moved)
+	}
+	got, err := os.ReadFile(filepath.Join(r.home, ".local", "bin", "relay"))
+	if err != nil || string(got) != "moved" {
+		t.Fatalf("installed relay = %q, %v; want rebuilt %q", got, err, "moved")
+	}
+}
+
+// TestDpmuxUpdate_ReplacesRunningBinary keeps copies of real executables running
+// from the install paths while the update runs. Truncating a running executable
+// fails with ETXTBSY; temp-file-plus-rename must succeed.
+func TestDpmuxUpdate_ReplacesRunningBinary(t *testing.T) {
+	// Resolve a real, non-multicall executable before newUpdateRepo narrows PATH.
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("sh not found: %v", err)
+	}
+	if shPath, err = filepath.EvalSymlinks(shPath); err != nil {
+		t.Fatal(err)
+	}
+	r := newUpdateRepo(t)
+	src, err := os.ReadFile(shPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(r.home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"relay", "dpmux"} {
+		dest := filepath.Join(binDir, name)
+		if err := os.WriteFile(dest, src, 0755); err != nil {
+			t.Fatal(err)
+		}
+		// The copy blocks reading stdin, so it stays running for the whole update.
+		cmd := exec.Command(dest, "-c", "read _")
+		stdin, err := cmd.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start old %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		// Precondition: the running binary really cannot be opened for writing.
+		if f, err := os.OpenFile(dest, os.O_WRONLY|os.O_TRUNC, 0); err == nil {
+			f.Close()
+			t.Fatalf("precondition failed: running %s was writable, test would not prove ETXTBSY safety", name)
+		}
+	}
+	if err := runUpdate(); err != nil {
+		t.Fatalf("update with running binaries: %v", err)
+	}
+	for _, name := range []string{"relay", "dpmux"} {
+		got, err := os.ReadFile(filepath.Join(binDir, name))
+		if err != nil || string(got) != "latest" {
+			t.Fatalf("installed %s = %q, %v; want rebuilt %q", name, got, err, "latest")
+		}
+		info, _ := os.Stat(filepath.Join(binDir, name))
+		if info.Mode().Perm() != 0755 {
+			t.Fatalf("%s mode = %v, want 0755", name, info.Mode().Perm())
+		}
+	}
+	entries, _ := os.ReadDir(binDir)
+	if len(entries) != 2 {
+		t.Fatalf("leftover temp files in %s: %v", binDir, entries)
 	}
 }
 

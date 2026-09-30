@@ -1,0 +1,5 @@
+    main_test.go:156: update with running binaries: install rebuilt relay: open /tmp/TestDpmuxUpdate_ReplacesRunningBinary2829669078/001/.local/bin/relay: text file busy
+--- FAIL: TestDpmuxUpdate_ReplacesRunningBinary (0.08s)
+FAIL
+FAIL	github.com/devpass/devpass-discord-relay/cmd/dpmux	0.082s
+FAIL

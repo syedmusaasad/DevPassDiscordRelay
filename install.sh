@@ -8,6 +8,9 @@ CONFIG_DIR="$HOME/.config/devpass-discord-relay"
 UNIT_DIR="$HOME/.config/systemd/user"
 ENV_FILE="$CONFIG_DIR/.env"
 ENV_BACKUP="$ENV_FILE.install.bak"
+# Test hooks (unset in normal use): install prebuilt binaries from another
+# directory, skip the build, and skip talking to the systemd user manager.
+SRC_BIN="${RELAY_INSTALL_SRC_BIN:-$ROOT/bin}"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$UNIT_DIR"
 restore_env() {
@@ -23,14 +26,20 @@ fi
 # Install is also safe when .env is absent: the trap simply has nothing to do.
 trap restore_env EXIT
 
-make -C "$ROOT" build
-install -m 0755 "$ROOT/bin/relay" "$BIN_DIR/relay"
-install -m 0755 "$ROOT/bin/dpmux" "$BIN_DIR/dpmux"
+if [[ "${RELAY_INSTALL_SKIP_BUILD:-}" != 1 ]]; then
+  make -C "$ROOT" build
+fi
+# install(1) unlinks and recreates the destination, so replacing a running
+# binary does not fail with ETXTBSY.
+install -m 0755 "$SRC_BIN/relay" "$BIN_DIR/relay"
+install -m 0755 "$SRC_BIN/dpmux" "$BIN_DIR/dpmux"
 printf '%s\n' "$ROOT" > "$CONFIG_DIR/install-source"
 install -m 0644 "$ROOT/systemd/devpass-discord-relay.service" "$UNIT_DIR/devpass-discord-relay.service"
 
-systemctl --user daemon-reload
-systemctl --user enable --now devpass-discord-relay.service
+if [[ "${RELAY_INSTALL_SKIP_SYSTEMD:-}" != 1 ]]; then
+  systemctl --user daemon-reload
+  systemctl --user enable --now devpass-discord-relay.service
+fi
 restore_env
 trap - EXIT
 printf 'installed relay and dpmux in %s\n' "$BIN_DIR"

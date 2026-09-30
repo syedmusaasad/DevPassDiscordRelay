@@ -45,7 +45,9 @@ Right-click your personal account username in the channel or server member list.
 
 ## 7. Write Environment Configuration
 
-Create the configuration file at `~/.config/devpass-discord-relay/.env` or in the repository root as `.env`:
+Create the configuration file at `~/.config/devpass-discord-relay/.env`. This is the file the installed systemd service reads (`EnvironmentFile`). A repository-root `.env` is only a development fallback when running `bin/relay` by hand from a checkout; the service never reads it.
+
+`DISCORD_USER_ID` is mandatory: the relay refuses to start without it.
 
 ```env
 # Required credentials
@@ -54,6 +56,7 @@ DISCORD_CHANNEL_ID=123456789012345678
 DISCORD_USER_ID=987654321098765432
 
 # Optional runtime controls
+# TELEMETRY_URL=   # unset = no telemetry
 APPROVAL_TIMEOUT_SECONDS=300
 SESSION_TTL_DAYS=30
 ```

@@ -125,6 +125,7 @@ func TestInvariant2_FirstSightReplay(t *testing.T) {
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
 		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
+		"DISCORD_USER_ID=user-allowed-001",
 	)
 	relayCmd.Stdout = io.Discard
 	relayCmd.Stderr = io.Discard
@@ -570,6 +571,7 @@ func startRelay(t *testing.T, bin, dbPath, stateDir, mockPort string) *exec.Cmd 
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
 		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
 		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
+		"DISCORD_USER_ID=user-allowed-001",
 	)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard

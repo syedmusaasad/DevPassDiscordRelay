@@ -61,6 +61,11 @@ func runRelay(ctx context.Context) error {
 		return fmt.Errorf("DISCORD_TOKEN and DISCORD_CHANNEL_ID must be set")
 	}
 
+	userID := os.Getenv("DISCORD_USER_ID")
+	if strings.TrimSpace(userID) == "" {
+		return fmt.Errorf("DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user")
+	}
+
 	dbPath, err := resolveDBPath()
 	if err != nil {
 		return err
@@ -93,7 +98,7 @@ func runRelay(ctx context.Context) error {
 		DiscordToken:  token,
 		DiscordAPIURL: apiURL,
 		ChannelID:     channelID,
-		AllowedUserID: os.Getenv("DISCORD_USER_ID"),
+		AllowedUserID: userID,
 		DBPath:        dbPath,
 		StateDir:      stateDir,
 		DpmuxBin:      os.Getenv("RELAY_DPMUX_BIN"), // optional override for dpmux binary path
@@ -103,7 +108,7 @@ func runRelay(ctx context.Context) error {
 			cfg.SessionTTL = time.Duration(days) * 24 * time.Hour
 		}
 	}
-	telemetry.Send(stateDir, relayVersion, os.Getenv("TELEMETRY_URL"))
+	go telemetry.Run(ctx, stateDir, relayVersion, os.Getenv("TELEMETRY_URL"))
 	if v := os.Getenv("RELAY_SPAWN_BIND_TIMEOUT_MS"); v != "" {
 		if ms, parseErr := strconv.Atoi(v); parseErr == nil && ms > 0 {
 			cfg.SpawnBindTimeout = time.Duration(ms) * time.Millisecond

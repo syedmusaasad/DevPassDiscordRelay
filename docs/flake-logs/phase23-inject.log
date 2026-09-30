@@ -1,0 +1,4 @@
+=== RUN   TestShouldAcceptAuthor_EmptyIDRejectsAll
+--- PASS: TestShouldAcceptAuthor_EmptyIDRejectsAll (0.00s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/internal/inject	0.003s

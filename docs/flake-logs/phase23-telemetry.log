@@ -1,0 +1,4 @@
+=== RUN   TestTelemetry_SendsAgainAfterDayBoundary
+--- PASS: TestTelemetry_SendsAgainAfterDayBoundary (0.21s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/internal/telemetry	0.214s

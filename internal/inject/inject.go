@@ -51,14 +51,15 @@ func New(stateDir string) *Injector {
 
 // ShouldAcceptAuthor returns true if the message author should be honoured.
 // authorID is the message author's Discord user ID; allowedUserID is
-// DISCORD_USER_ID from the environment.  Empty allowedUserID means "accept all".
+// DISCORD_USER_ID from the environment.  An empty allowedUserID is
+// fail-closed: every author is rejected (the relay also refuses to start).
 // Bot messages (isBot=true) are always dropped.
 func ShouldAcceptAuthor(authorID string, isBot bool, allowedUserID string) bool {
 	if isBot {
 		return false
 	}
 	if allowedUserID == "" {
-		return true
+		return false
 	}
 	return authorID == allowedUserID
 }

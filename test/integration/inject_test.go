@@ -377,7 +377,7 @@ func TestApproval_AutoDenyTimeout(t *testing.T) {
 	relayCmd := exec.Command(relayBin)
 	relayCmd.Env = append(os.Environ(), "DISCORD_TOKEN=test-token", "DISCORD_CHANNEL_ID=test-channel-001",
 		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort), fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
-		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir), "APPROVAL_TIMEOUT_SECONDS=1")
+		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir), "DISCORD_USER_ID=user-allowed-001", "APPROVAL_TIMEOUT_SECONDS=1")
 	relayCmd.Stdout, relayCmd.Stderr = io.Discard, io.Discard
 	if err := relayCmd.Start(); err != nil {
 		t.Fatal(err)

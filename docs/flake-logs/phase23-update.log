@@ -1,0 +1,28 @@
+=== RUN   TestDpmuxUpdate_ChecksOutLatestTag
+HEAD is now at 010441a release
+mkdir -p bin
+printf 'latest' > bin/relay
+printf 'latest' > bin/dpmux
+Update complete. Restart with: systemctl --user restart devpass-discord-relay now? [y/N] --- PASS: TestDpmuxUpdate_ChecksOutLatestTag (0.07s)
+=== RUN   TestDpmuxUpdate_FollowsMovedLatestTag
+HEAD is now at 010441a release
+mkdir -p bin
+printf 'latest' > bin/relay
+printf 'latest' > bin/dpmux
+Update complete. Restart with: systemctl --user restart devpass-discord-relay now? [y/N] From /tmp/TestDpmuxUpdate_FollowsMovedLatestTag2030333389/002/remote
+   842da39..fba4d6d  master     -> origin/master
+ t [tag update]      latest     -> latest
+Previous HEAD position was 010441a release
+HEAD is now at fba4d6d moved release
+mkdir -p bin
+printf 'moved' > bin/relay
+printf 'moved' > bin/dpmux
+Update complete. Restart with: systemctl --user restart devpass-discord-relay now? [y/N] --- PASS: TestDpmuxUpdate_FollowsMovedLatestTag (0.12s)
+=== RUN   TestDpmuxUpdate_ReplacesRunningBinary
+HEAD is now at 010441a release
+mkdir -p bin
+printf 'latest' > bin/relay
+printf 'latest' > bin/dpmux
+Update complete. Restart with: systemctl --user restart devpass-discord-relay now? [y/N] --- PASS: TestDpmuxUpdate_ReplacesRunningBinary (0.07s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/cmd/dpmux	0.266s

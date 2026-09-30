@@ -51,13 +51,14 @@ This structural constraint introduces a direct privacy boundary. If you invite t
 
 ## Security posture
 
-DevPassDiscordRelay enforces five foundational security boundaries:
+DevPassDiscordRelay makes the following security commitments and disclosures:
 
-- Runs on your machine under your account: The daemon executes locally as your non-root user process. It requests no elevated privileges.
+- Runs on your machine under your account: The daemon executes locally as an ordinary process of the account that installed it (a systemd user unit). It does not drop privileges itself, so anything it runs has your account's access.
 - Per-user token in .env never committed and backed up across reinstalls: Secrets live in ~/.config/devpass-discord-relay/.env outside source control. The install.sh script preserves this file during updates.
-- Single-user gating at the event layer: The relay filters incoming gateway dispatches by DISCORD_USER_ID immediately. The handler discards messages from unauthorized users and external bots before processing.
+- Single-user gating at the event layer: The relay refuses to start (non-zero exit, with a log line naming DISCORD_USER_ID) when DISCORD_USER_ID is unset or empty; there is no accept-everyone mode. Once running, the handler discards messages from every other user and from bots before processing.
 - Outbound only: The daemon establishes outbound TLS connections to Discord API endpoints. It opens no listening network ports on your machine.
 - Content goes only to your own private guild: The daemon forwards transcripts solely to the configured private server channel. No external metrics service receives conversation logs.
+- Telemetry is off unless you set TELEMETRY_URL: When TELEMETRY_URL is set, the relay POSTs once per UTC day (while running, not only at startup) a body containing only sha256(username)[:12] and the relay version. Nothing else is sent. Leave TELEMETRY_URL unset and nothing is sent.
 
 ## Usage
 

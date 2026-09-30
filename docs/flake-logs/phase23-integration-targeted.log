@@ -1,0 +1,94 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-09-30T16:27:40Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.53MB 0.1s done
+#5 DONE 0.2s
+
+#6 [test  3/11] RUN mkdir -p /run/systemd/system
+#6 CACHED
+
+#7 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#7 CACHED
+
+#8 [test  6/11] WORKDIR /workspace
+#8 CACHED
+
+#9 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#9 CACHED
+
+#10 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#10 CACHED
+
+#11 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.2s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.2s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 34.8s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 5.7s done
+#16 exporting manifest sha256:9374cab834f44a8eb5465c60e466783c313e61a34f81e06f1af659f42625cf36 done
+#16 exporting config sha256:3aff04d2fe05a26eead88f50cc8d9e3e976da1b07ede84303005136723ad659c done
+#16 exporting attestation manifest sha256:586e6281c2841ebb54002db2b7d45f2c3d9f55afe789a5d67b99f2f1e66b35ae done
+#16 exporting manifest list sha256:da7c69886bd9fc1830cc9b11e7f5f56ab536da70b5081a4f26671508c3e736e1 done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 1.3s done
+#16 DONE 7.0s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.1s
+ test  Built
+=== RUN   TestRelay_RefusesWithoutUserID
+=== RUN   TestRelay_RefusesWithoutUserID/unset
+    deploy_test.go:64: exit=1 output="2026/09/30 16:28:36 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDunset2057430/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/09/30 16:28:36 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+=== RUN   TestRelay_RefusesWithoutUserID/empty
+    deploy_test.go:64: exit=1 output="2026/09/30 16:28:36 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDempty2784086555/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/09/30 16:28:36 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+=== RUN   TestRelay_RefusesWithoutUserID/blank
+    deploy_test.go:64: exit=1 output="2026/09/30 16:28:36 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDblank2583229347/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/09/30 16:28:36 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+--- PASS: TestRelay_RefusesWithoutUserID (0.01s)
+    --- PASS: TestRelay_RefusesWithoutUserID/unset (0.01s)
+    --- PASS: TestRelay_RefusesWithoutUserID/empty (0.00s)
+    --- PASS: TestRelay_RefusesWithoutUserID/blank (0.00s)
+=== RUN   TestInstalledUnit_ResolvesDpmux
+--- PASS: TestInstalledUnit_ResolvesDpmux (1.34s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	1.359s
+
+real	1m0.303s
+user	0m1.857s
+sys	0m0.914s
