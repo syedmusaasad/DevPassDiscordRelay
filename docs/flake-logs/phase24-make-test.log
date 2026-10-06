@@ -1,0 +1,361 @@
+CGO_ENABLED=0 go test -p 1 ./...
+ok  	github.com/devpass/devpass-discord-relay/cmd/dpmux	0.385s
+?   	github.com/devpass/devpass-discord-relay/cmd/fake-devpass-code	[no test files]
+?   	github.com/devpass/devpass-discord-relay/cmd/mock-discord	[no test files]
+?   	github.com/devpass/devpass-discord-relay/cmd/relay	[no test files]
+ok  	github.com/devpass/devpass-discord-relay/internal/discord	(cached)
+ok  	github.com/devpass/devpass-discord-relay/internal/inject	0.004s
+ok  	github.com/devpass/devpass-discord-relay/internal/mirror	1.396s
+ok  	github.com/devpass/devpass-discord-relay/internal/state	0.004s
+ok  	github.com/devpass/devpass-discord-relay/internal/telemetry	0.258s
+ok  	github.com/devpass/devpass-discord-relay/internal/tmuxctl	0.011s
+ok  	github.com/devpass/devpass-discord-relay/internal/transcript	0.320s
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-10-06T04:11:11Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.41MB 0.2s done
+#5 DONE 0.2s
+
+#6 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#6 CACHED
+
+#7 [test  3/11] RUN mkdir -p /run/systemd/system
+#7 CACHED
+
+#8 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#8 CACHED
+
+#9 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#10 CACHED
+
+#11 [test  6/11] WORKDIR /workspace
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.3s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.2s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 54.4s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 8.0s done
+#16 exporting manifest sha256:21ce97f869579d050a54f049c4070ae18d7b0826af073849e6d77c5e94e92dd3 done
+#16 exporting config sha256:de46f30f7137cbf1df8c0265a9dc7a6c37536762a0e9f706d781472951506608 done
+#16 exporting attestation manifest sha256:b61841845c7033ef0dbdcdf34bd5527e90c34447bfb885f45a228a197db06bad 0.0s done
+#16 exporting manifest list sha256:507b98347e9a2f1eae3d2617896dd27f0c25f11c1760a4c609ed45ad1100986f done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 2.0s done
+#16 DONE 10.0s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestRelay_RefusesWithoutUserID
+=== RUN   TestRelay_RefusesWithoutUserID/unset
+    deploy_test.go:64: exit=1 output="2026/10/06 04:12:32 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDunset798576953/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/10/06 04:12:32 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+=== RUN   TestRelay_RefusesWithoutUserID/empty
+    deploy_test.go:64: exit=1 output="2026/10/06 04:12:32 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDempty361804085/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/10/06 04:12:32 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+=== RUN   TestRelay_RefusesWithoutUserID/blank
+    deploy_test.go:64: exit=1 output="2026/10/06 04:12:32 main.go:55: relay: .env load: no .env found in [/tmp/TestRelay_RefusesWithoutUserIDblank1044878797/001/.config/devpass-discord-relay/.env .env] (continuing with environment)\n2026/10/06 04:12:32 main.go:48: relay: DISCORD_USER_ID must be set: refusing to start without a single allowed Discord user"
+--- PASS: TestRelay_RefusesWithoutUserID (0.02s)
+    --- PASS: TestRelay_RefusesWithoutUserID/unset (0.01s)
+    --- PASS: TestRelay_RefusesWithoutUserID/empty (0.00s)
+    --- PASS: TestRelay_RefusesWithoutUserID/blank (0.01s)
+=== RUN   TestInstalledUnit_ResolvesDpmux
+--- PASS: TestInstalledUnit_ResolvesDpmux (1.34s)
+=== RUN   TestDiscord429_ProductionClientBackoff
+2026/10/06 04:12:33 mirror: 429 rate-limit on send, retry after 600ms
+    discord429_test.go:173: ✓ retry waited 602ms (RetryAfter=0.600s)
+    discord429_test.go:187: ✓ bounded retry: 2 total requests to /api/v9/channels/ch-429-backoff-001/messages (expected 2)
+    discord429_test.go:206: ✓ no duplicate message: 1 recorded send(s) of the retried content
+--- PASS: TestDiscord429_ProductionClientBackoff (0.71s)
+=== RUN   TestDpmux_MarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791259954428-1266" started, target=dp-1791259954428-1266:0.0
+    dpmux_test.go:110: ✓ pending marker preceded devpass-code startup
+--- PASS: TestDpmux_MarkerBeforeSpawn (0.06s)
+=== RUN   TestDpmux_MarkerBeforeSpawn_SystemdScope
+--- PASS: TestDpmux_MarkerBeforeSpawn_SystemdScope (0.07s)
+=== RUN   TestDpmux_NewWindowMarkerBeforeSpawn
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791259954571-1317" started, target=test-nw-host-1791259954556:=dp-1791259954571-1317
+    dpmux_test.go:267: dpmux stdout: "dp-1791259954571-1317\n"
+    dpmux_test.go:301: ✓ pending marker preceded devpass-code startup on new-window path
+--- PASS: TestDpmux_NewWindowMarkerBeforeSpawn (0.08s)
+=== RUN   TestDpmux_ForeignSocketFallsBackToDefault
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791259954646-1348" started, target=dp-1791259954646-1348:0.0
+    dpmux_test.go:398: dpmux reported session: "dp-1791259954646-1348"
+    dpmux_test.go:410: ✓ session "dp-1791259954646-1348" exists on default socket
+    dpmux_test.go:418: ✓ session "dp-1791259954646-1348" not on relaytest socket (correct)
+    dpmux_test.go:433: ✓ pending marker nonce="f348b25974f8a3e7dc9fcd7e19ba8572" target="dp-1791259954646-1348:0.0"
+--- PASS: TestDpmux_ForeignSocketFallsBackToDefault (1.08s)
+=== RUN   TestInject_ReadinessProbe
+    inject_test.go:114: thread created: id=2
+    inject_test.go:142: ✓ readiness probe: prompt landed in DB
+    inject_test.go:153: ✓ prompt landed exactly once (1 occurrences)
+--- PASS: TestInject_ReadinessProbe (3.45s)
+=== RUN   TestInject_ForeignAuthorDropped
+    inject_test.go:232: thread created: id=2
+    inject_test.go:272: ✓ foreign author dropped: no injected parts in DB
+--- PASS: TestInject_ForeignAuthorDropped (2.14s)
+=== RUN   TestInject_AttachmentPath
+    inject_test.go:325: ✓ attachment downloaded to /tmp/TestInject_AttachmentPath2286687293/001/staging/ses_attach_test_001/my image.png (sanitised from "my image\t.png")
+--- PASS: TestInject_AttachmentPath (0.00s)
+=== RUN   TestApproval_AutoDenyTimeout
+--- PASS: TestApproval_AutoDenyTimeout (2.96s)
+=== RUN   TestInteraction_ApproveDrivesApproveRecipe
+2026/10/06 04:12:44 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:12:44 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:12:44 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:12:44 main.go:157: relay: starting watcher
+2026/10/06 04:12:45 watcher.go:513: mirror: attaching session ses_1791259964403167_1 target=dp-interaction-approve:0.0
+--- PASS: TestInteraction_ApproveDrivesApproveRecipe (2.07s)
+=== RUN   TestInteraction_DenyDrivesDenyRecipe
+2026/10/06 04:12:46 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:12:46 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:12:46 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:12:46 main.go:157: relay: starting watcher
+2026/10/06 04:12:47 watcher.go:513: mirror: attaching session ses_1791259966460397_1 target=dp-interaction-deny:0.0
+--- PASS: TestInteraction_DenyDrivesDenyRecipe (2.08s)
+=== RUN   TestApproval_SecondPromptGetsButtons
+--- PASS: TestApproval_SecondPromptGetsButtons (2.18s)
+=== RUN   TestQuestionPicker_MenuSelection
+--- PASS: TestQuestionPicker_MenuSelection (2.07s)
+=== RUN   TestGateway_DispatchBeforeReadyIsDelivered
+2026/10/06 04:12:53 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:12:54 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:12:54 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:12:54 main.go:157: relay: starting watcher
+2026/10/06 04:12:54 watcher.go:1301: mirror: handleDiscordMessage: channel=thread-before-ready-001 session=ses_gateway_before_ready
+--- PASS: TestGateway_DispatchBeforeReadyIsDelivered (4.17s)
+=== RUN   TestGateway_DispatchWithoutSessionFailsClearly
+--- PASS: TestGateway_DispatchWithoutSessionFailsClearly (0.41s)
+=== RUN   TestInvariant2_FirstSightReplay
+    mirror_test.go:94: session completed before relay: ses_1791259977356730_1
+    mirror_test.go:164: ✓ first-sight replay: turn from completed session visible in thread (6 messages)
+--- PASS: TestInvariant2_FirstSightReplay (1.80s)
+=== RUN   TestMirror_EmbedFlip
+    mirror_test.go:237: ✓ tool embed flipped to ✅ done
+--- PASS: TestMirror_EmbedFlip (1.53s)
+=== RUN   TestMirror_NoOutputLine
+    mirror_test.go:296: ✓ 'Turn finished without output' line posted
+--- PASS: TestMirror_NoOutputLine (1.53s)
+=== RUN   TestMirror_ToolErrorSoftening
+    mirror_test.go:358: ✓ tool error embed posted with ❌ failed
+--- PASS: TestMirror_ToolErrorSoftening (1.53s)
+=== RUN   TestMirror_LongTextChunksToFollowups
+    mirror_test.go:473: ✓ long text split into 3 chunks, concatenation matches (len=4004)
+--- PASS: TestMirror_LongTextChunksToFollowups (6.15s)
+=== RUN   TestMirror_ToolErrorSoftenedOnCleanEnd
+    mirror_test.go:538: ✓ tool error embed posted with ❌ failed
+    mirror_test.go:544: ✓ tool error softened to ⚠️ warning with 'turn completed' after clean step-finish
+--- PASS: TestMirror_ToolErrorSoftenedOnCleanEnd (1.53s)
+=== RUN   TestRestartSurvival_DisposableUnit
+    restart_survival_test.go:28: user-manager probe passed: CGO_ENABLED=0
+        DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/testuser-runtime/bus
+        GOMODCACHE=/home/testuser/go/pkg/mod
+        GOPATH=/home/testuser/go
+        HOME=/home/testuser
+        HOSTNAME=4ddcda133026
+        PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+        PWD=/workspace
+        XDG_RUNTIME_DIR=/tmp/testuser-runtime
+--- PASS: TestRestartSurvival_DisposableUnit (3.79s)
+=== RUN   TestInvariant3_InjectionEchoVerification
+2026/10/06 04:13:15 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:15 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:15 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:15 main.go:157: relay: starting watcher
+2026/10/06 04:13:16 watcher.go:513: mirror: attaching session ses_echo_verify_001 target=dp-echo-verify:0.0
+    resume_test.go:124: thread created: id=2
+2026/10/06 04:13:16 watcher.go:1301: mirror: handleDiscordMessage: channel=2 session=ses_echo_verify_001
+    resume_test.go:155: ✓ Invariant 3: injection echo appeared in DB (echo verification confirmed)
+    resume_test.go:166: ✓ echo appeared 1 time(s) in DB
+    resume_test.go:182: ✓ Invariant 3: Discord echo count = 1 (expected 1, duplicate suppression working)
+--- PASS: TestInvariant3_InjectionEchoVerification (2.46s)
+=== RUN   TestInvariant4_ResumeRefusalRetry
+2026/10/06 04:13:17 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:17 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:17 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:17 main.go:157: relay: starting watcher
+2026/10/06 04:13:18 watcher.go:513: mirror: attaching session ses_resume_refusal_001 target=dp-refusal-test:0.0
+    resume_test.go:410: thread created: id=2
+2026/10/06 04:13:19 watcher.go:1301: mirror: handleDiscordMessage: channel=2 session=ses_resume_refusal_001
+2026/10/06 04:13:19 watcher.go:1340: mirror: pane dp-refusal-test:0.0 is dead for session ses_resume_refusal_001 – attempting resume
+2026/10/06 04:13:19 watcher.go:1481: mirror: resumeDeadSession: session=ses_resume_refusal_001
+2026/10/06 04:13:19 watcher.go:1558: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+2026/10/06 04:13:19 watcher.go:1621: mirror: refusal detected via pane text for ses_resume_refusal_001
+2026/10/06 04:13:19 watcher.go:1500: mirror: resume refused for session ses_resume_refusal_001 (attempt 1), tearing down and retrying
+2026/10/06 04:13:19 watcher.go:1448: mirror: teardown pane dp-resume-retry-1-1974:0.0
+2026/10/06 04:13:19 watcher.go:1558: mirror: spawnResume: dpmux --session ses_resume_refusal_001
+    resume_test.go:433: ✓ Invariant 4a: resume refusal detected, retried, prompt injected successfully
+    resume_test.go:444: dpmux call count: 2 (expected exactly 2)
+--- PASS: TestInvariant4_ResumeRefusalRetry (2.46s)
+=== RUN   TestInvariant4_AmbiguousIdCandidateList
+2026/10/06 04:13:20 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:20 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:20 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:20 main.go:157: relay: starting watcher
+2026/10/06 04:13:20 watcher.go:1301: mirror: handleDiscordMessage: channel=ch-ambig-threadA-001 session=ses_ambig_A001
+    resume_test.go:586: ✓ Invariant 4b: candidate list posted for ambiguous !resume
+    resume_test.go:601: ✓ candidate list contains provider field: "**Multiple sessions available — reply `!resume <n>` to choose:**\n1. `ses_ambig_B001` | provider: `openai` | last active: 2s ago\n2. `ses_ambig_A001` | provider: `anthropic` | last active: 5s ago"
+2026/10/06 04:13:20 watcher.go:1301: mirror: handleDiscordMessage: channel=ch-ambig-threadA-001 session=ses_ambig_A001
+2026/10/06 04:13:20 watcher.go:1481: mirror: resumeDeadSession: session=ses_ambig_B001
+2026/10/06 04:13:20 watcher.go:1558: mirror: spawnResume: dpmux --session ses_ambig_B001
+dpmux: devpass-code not found on PATH (set RELAY_DEVPASS_BIN): exec: "devpass-code": executable file not found in $PATH
+2026/10/06 04:13:20 watcher.go:1898: mirror: resume choice ses_ambig_B001: spawn resume: dpmux --session ses_ambig_B001: exit status 1
+    resume_test.go:620: ✓ relay handled !resume 1 (1 response messages)
+    resume_test.go:622:   msg: ⚠️ Resume failed: spawn resume: dpmux --session ses_ambig_B001: exit status 1
+    resume_test.go:624: ✓ Invariant 4b: ambiguous !resume handled without crash
+--- PASS: TestInvariant4_AmbiguousIdCandidateList (4.63s)
+=== RUN   TestSmoke_FakeDevpassCodeStartsAndReady
+    smoke_test.go:78: ✓ ready signature 'Ask anything...' appeared in pane
+    smoke_test.go:84: ✓ DB file created at /tmp/TestSmoke_FakeDevpassCodeStartsAndReady3027121541/001/devpass-code/opencode.db
+    smoke_test.go:97: ✓ session row found: id=ses_1791260004695748_1
+--- PASS: TestSmoke_FakeDevpassCodeStartsAndReady (0.44s)
+=== RUN   TestSmoke_FakeDevpassCodeRefusesUnknownSession
+    smoke_test.go:123: ✓ refusal text correct: Error: Session not found: ses_doesnotexist999
+--- PASS: TestSmoke_FakeDevpassCodeRefusesUnknownSession (0.01s)
+=== RUN   TestSmoke_FakeDevpassCodeRefuseFirstResume
+    smoke_test.go:145: ✓ FAKE_DP_REFUSE_FIRST_RESUME works
+--- PASS: TestSmoke_FakeDevpassCodeRefuseFirstResume (0.01s)
+=== RUN   TestInvariant1_OwnTranscriptBinding
+2026/10/06 04:13:25 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:25 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:25 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:25 main.go:157: relay: starting watcher
+    spawn_test.go:116: stale session inserted: id=ses_000_stale_invariant1 (sorts first, no nonce, created after relay start)
+    spawn_test.go:138: spawn triggered at spawnStart=1791260007635 (stale row created at 1791260006433)
+2026/10/06 04:13:27 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:27 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260007637)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260007639-2085" started, target=dp-1791260007639-2085:0.0
+2026/10/06 04:13:27 watcher.go:2090: mirror: dpmux spawned session "dp-1791260007639-2085"
+2026/10/06 04:13:27 watcher.go:2172: mirror: bound new session ses_1791260007716937_1 to dpmux dp-1791260007639-2085 (target=dp-1791260007639-2085:0.0)
+2026/10/06 04:13:27 watcher.go:513: mirror: attaching session ses_1791260007716937_1 target=dp-1791260007639-2085:0.0
+    spawn_test.go:150: thread created: id=2
+    spawn_test.go:182: ✓ Invariant 1: stale session not bound; new session referenced in Discord
+    spawn_test.go:207: new session id: ses_1791260007716937_1 (sorts after stale ses_000_stale_invariant1: true)
+    spawn_test.go:212: ✓ first prompt injected into the new (non-stale) session
+--- PASS: TestInvariant1_OwnTranscriptBinding (2.93s)
+=== RUN   TestSpawn_ChannelMessageTriggersDpmux
+2026/10/06 04:13:28 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:28 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:28 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:28 main.go:157: relay: starting watcher
+2026/10/06 04:13:28 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:28 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260008461)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260008464-2136" started, target=dp-1791260008464-2136:0.0
+2026/10/06 04:13:28 watcher.go:2090: mirror: dpmux spawned session "dp-1791260008464-2136"
+2026/10/06 04:13:28 watcher.go:2172: mirror: bound new session ses_1791260008548888_1 to dpmux dp-1791260008464-2136 (target=dp-1791260008464-2136:0.0)
+2026/10/06 04:13:28 watcher.go:513: mirror: attaching session ses_1791260008548888_1 target=dp-1791260008464-2136:0.0
+    spawn_test.go:290: ✓ thread created: id=2
+    spawn_test.go:311: session id: ses_1791260008548888_1
+    spawn_test.go:316: ✓ first prompt injected into the spawned session
+--- PASS: TestSpawn_ChannelMessageTriggersDpmux (0.82s)
+=== RUN   TestInvariant1_ConcurrentForeignSessionRejected
+2026/10/06 04:13:28 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:28 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:29 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:29 main.go:157: relay: starting watcher
+    spawn_test.go:416: spawn triggered at spawnStart=1791260009292
+2026/10/06 04:13:29 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:29 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260009294)
+    spawn_test.go:444: foreign session inserted: id=ses_concurrent_foreign_001 createdAt=1791260009894 (after spawnStart, before real row)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260009297-2184" started, target=dp-1791260009297-2184:0.0
+2026/10/06 04:13:31 watcher.go:2090: mirror: dpmux spawned session "dp-1791260009297-2184"
+2026/10/06 04:13:33 watcher.go:2172: mirror: bound new session ses_1791260013358988_1 to dpmux dp-1791260009297-2184 (target=dp-1791260009297-2184:0.0)
+2026/10/06 04:13:33 watcher.go:513: mirror: attaching session ses_1791260013358988_1 target=dp-1791260009297-2184:0.0
+    spawn_test.go:451: thread created: id=2
+    spawn_test.go:494: ✓ Invariant 1c: foreign concurrent session rejected; bound session: ses_1791260013358988_1
+    spawn_test.go:514: ✓ first prompt injected only into the real, verified session
+--- PASS: TestInvariant1_ConcurrentForeignSessionRejected (4.65s)
+=== RUN   TestInvariant1_MissingIdentityFailsClosed
+2026/10/06 04:13:33 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:33 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:33 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:33 main.go:157: relay: starting watcher
+2026/10/06 04:13:33 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:33 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260013946)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260013948-2259" started, target=dp-1791260013948-2259:0.0
+2026/10/06 04:13:34 watcher.go:2090: mirror: dpmux spawned session "dp-1791260013948-2259"
+    spawn_test.go:636: eligible-but-unproven foreign session inserted: id=ses_eligible_but_unproven_001 createdAt=1791260014044
+2026/10/06 04:13:35 watcher.go:1420: mirror: teardown failed spawn session dp-1791260013948-2259
+2026/10/06 04:13:35 watcher.go:1422: mirror: kill-session dp-1791260013948-2259: exit status 1: no server running on /tmp/tmux-1001/default
+2026/10/06 04:13:35 watcher.go:1279: mirror: spawn from Discord: readiness probe failed for dpmux session "dp-1791260013948-2259" (target=dp-1791260013948-2259:0.0); nothing injected, nothing bound
+    spawn_test.go:653: ✓ Invariant 1: missing identity evidence → no thread/message ever created
+    spawn_test.go:670: ✓ no injection occurred without verified identity
+--- PASS: TestInvariant1_MissingIdentityFailsClosed (5.93s)
+=== RUN   TestSpawn_PromptBeforeBind
+2026/10/06 04:13:39 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:39 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:39 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:39 main.go:157: relay: starting watcher
+2026/10/06 04:13:39 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:39 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260019585)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260019592-2315" started, target=dp-1791260019592-2315:0.0
+2026/10/06 04:13:39 watcher.go:2090: mirror: dpmux spawned session "dp-1791260019592-2315"
+2026/10/06 04:13:39 watcher.go:2172: mirror: bound new session ses_1791260019670722_1 to dpmux dp-1791260019592-2315 (target=dp-1791260019592-2315:0.0)
+2026/10/06 04:13:39 watcher.go:513: mirror: attaching session ses_1791260019670722_1 target=dp-1791260019592-2315:0.0
+    spawn_test.go:783: ✓ prompt visible in pane dp-1791260019592-2315:0.0
+    spawn_test.go:790: ✓ thread created: id=2
+    spawn_test.go:816: ✓ prompt in DB under ses_1791260019670722_1, matching the created line
+    spawn_test.go:828: ✓ reply mirrored; session bound from the created line
+--- PASS: TestSpawn_PromptBeforeBind (0.76s)
+=== RUN   TestSpawn_FailureTeardownSparesLiveSession
+2026/10/06 04:13:40 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:13:40 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:13:40 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:13:40 main.go:157: relay: starting watcher
+2026/10/06 04:13:40 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:13:40 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260020787)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260020791-2383" started, target=dp-1791260020791-2383:0.0
+2026/10/06 04:13:40 watcher.go:2090: mirror: dpmux spawned session "dp-1791260020791-2383"
+    spawn_test.go:923: failed spawn session: dp-1791260020791-2383
+2026/10/06 04:13:43 watcher.go:1420: mirror: teardown failed spawn session dp-1791260020791-2383
+2026/10/06 04:13:43 watcher.go:1279: mirror: spawn from Discord: timed out or failed to verify session identity for dpmux session "dp-1791260020791-2383" (spawnStart=1791260020787, stderrLog=/tmp/TestSpawn_FailureTeardownSparesLiveSession2510736928/002/stderr-dp-1791260020791-2383.log)
+    spawn_test.go:961: ✓ live pane + record survive; failed spawn pane gone; one notice
+--- PASS: TestSpawn_FailureTeardownSparesLiveSession (5.41s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	73.284s

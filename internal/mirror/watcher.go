@@ -1405,6 +1405,27 @@ func (p *pendingResumeStore) delete(threadID string) {
 	delete(p.entries, threadID)
 }
 
+// teardownSpawnedSession kills exactly one tmux session, addressed by its exact
+// name ("=" disables tmux's prefix/fuzzy matching), so a failed spawn can never
+// take down another session's pane. Only relay-spawned "dp-" names are accepted.
+func teardownSpawnedSession(sessionName string) {
+	if !strings.HasPrefix(sessionName, "dp-") || strings.ContainsAny(sessionName, ":.") {
+		log.Printf("mirror: refusing to tear down unexpected session name %q", sessionName)
+		return
+	}
+	tmuxBin, err := tmuxctl.ResolveTmuxBin()
+	if err != nil {
+		return
+	}
+	log.Printf("mirror: teardown failed spawn session %s", sessionName)
+	if out, err := exec.Command(tmuxBin, "kill-session", "-t", "="+sessionName).CombinedOutput(); err != nil {
+		log.Printf("mirror: kill-session %s: %v: %s", sessionName, err, strings.TrimSpace(string(out)))
+	}
+}
+
+// TeardownSpawnedSession is the exported variant used in tests.
+func TeardownSpawnedSession(sessionName string) { teardownSpawnedSession(sessionName) }
+
 // teardownPane kills the process group of the tmux pane's process, then kill-window.
 // This is the canonical teardown used by !quit and refusal handling.
 // The claim in sessions.json is kept.
@@ -2068,11 +2089,37 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	}
 	log.Printf("mirror: dpmux spawned session %q", sessionName)
 
-	// Read and parse the pending marker written by dpmux.
 	pendingPath := filepath.Join(w.cfg.StateDir, "pending-"+sessionName)
+
+	// From here on any failure tears down ONLY this spawn's own tmux session
+	// (addressed by its exact name) and never touches any other pane.
+	spawnTarget := sessionName + ":0.0"
+	spawnFail := func(cause error) error {
+		var paneWasAlive bool
+		if strings.HasPrefix(spawnTarget, sessionName+":") {
+			paneWasAlive = isTmuxPaneAlive("=" + spawnTarget)
+			teardownSpawnedSession(sessionName)
+		} else {
+			// dpmux placed the spawn in a window of a host tmux session: kill
+			// only that window, never the host session.
+			paneWasAlive = isTmuxPaneAlive(spawnTarget)
+			teardownPaneTarget(spawnTarget)
+		}
+		os.Remove(pendingPath)
+		if paneWasAlive {
+			// The user's message would otherwise vanish silently. No thread
+			// exists (nothing is bound), so the notice goes to the channel.
+			// A pane that died on its own stays silent (fail closed, no
+			// Discord traffic without verified identity).
+			w.sendToThread(w.cfg.ChannelID, "⚠️ Could not start a new devpass-code session for your message; the spawned session was shut down. Please try again.")
+		}
+		return cause
+	}
+
+	// Read and parse the pending marker written by dpmux.
 	markerData, readErr := os.ReadFile(pendingPath)
 	if readErr != nil {
-		return fmt.Errorf("read pending marker for %q: %w", sessionName, readErr)
+		return spawnFail(fmt.Errorf("read pending marker for %q: %w", sessionName, readErr))
 	}
 	var marker spawnMarkerJSON
 	if jsonErr := json.Unmarshal(markerData, &marker); jsonErr != nil {
@@ -2082,6 +2129,7 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	if marker.Target == "" {
 		marker.Target = sessionName + ":0.0"
 	}
+	spawnTarget = marker.Target
 	spawnInstant := marker.SpawnInstant
 	if spawnInstant < spawnStartMS {
 		spawnInstant = spawnStartMS
@@ -2093,14 +2141,32 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 	if marker.StderrLog == "" {
 		// No identity evidence source at all: fail closed. Never claim or
 		// inject into any row without the phase-16-verified protocol.
-		return fmt.Errorf("pending marker for %q has no stderrLog; cannot verify session identity (spawnStart=%d)", sessionName, spawnStartMS)
+		return spawnFail(fmt.Errorf("pending marker for %q has no stderrLog; cannot verify session identity (spawnStart=%d)", sessionName, spawnStartMS))
 	}
 
+	// 1. Readiness probe. devpass-code 1.18.11 creates its session only after
+	// the first prompt arrives (docs/BINDING-PROTOCOL.md), so the prompt must be
+	// delivered BEFORE identity can exist. A failed probe never binds or mirrors.
+	if !inject.WaitReady(tmuxTarget) {
+		return spawnFail(fmt.Errorf("readiness probe failed for dpmux session %q (target=%s); nothing injected, nothing bound", sessionName, tmuxTarget))
+	}
+
+	// 2. Deliver the triggering message as the first prompt.
+	var atts []inject.Attachment
+	for _, a := range evAtts {
+		atts = append(atts, inject.Attachment{Filename: a.Filename, URL: a.URL})
+	}
+	if err := w.injector.SendPrompt(tmuxTarget, sessionName, content, atts); err != nil {
+		return spawnFail(fmt.Errorf("inject first prompt into dpmux session %q: %w", sessionName, err))
+	}
+
+	// 3. Only now wait for identity (bind timeout starts after the send): the
+	// spawn's own stderr log must carry exactly one message=created id.
 	boundSessionID, bound := bindSessionByStderrLog(
 		ctx, w.db, marker.StderrLog, tmuxTarget, spawnInstant, bindTimeout, isTmuxPaneAlive,
 	)
 	if !bound || boundSessionID == "" {
-		return fmt.Errorf("timed out or failed to verify session identity for dpmux session %q (spawnStart=%d, stderrLog=%s)", sessionName, spawnStartMS, marker.StderrLog)
+		return spawnFail(fmt.Errorf("timed out or failed to verify session identity for dpmux session %q (spawnStart=%d, stderrLog=%s)", sessionName, spawnStartMS, marker.StderrLog))
 	}
 
 	log.Printf("mirror: bound new session %s to dpmux %s (target=%s)", boundSessionID, sessionName, tmuxTarget)
@@ -2132,21 +2198,6 @@ func (w *Watcher) handleSpawnFromDiscord(ctx context.Context, content string, ev
 			}
 		}(boundSessionID, tmuxTarget, createdAt)
 	}
-
-	// Inject the original Discord message as the first prompt.
-	// Build attachment list.
-	var atts []inject.Attachment
-	for _, a := range evAtts {
-		atts = append(atts, inject.Attachment{Filename: a.Filename, URL: a.URL})
-	}
-
-	// Inject in a separate goroutine; the readiness probe inside Inject will
-	// wait for "Ask anything..." before sending the text.
-	go func(target, sid, text string, attachments []inject.Attachment) {
-		if err := w.injector.Inject(target, sid, text, attachments); err != nil {
-			log.Printf("mirror: inject first prompt into %s: %v", sid, err)
-		}
-	}(tmuxTarget, boundSessionID, content, atts)
 
 	return nil
 }

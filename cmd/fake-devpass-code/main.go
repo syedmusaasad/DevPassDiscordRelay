@@ -16,6 +16,9 @@
 //     FAKE_DP_READY_DELAY_MS=<n>        — delay before showing ready prompt
 //     FAKE_DP_TRANSCRIPT_DELAY_MS=<n>   — delay before writing session row to DB
 //     FAKE_DP_SWALLOW_UNTIL_READY=1     — (documented; input is always stdin here)
+//     FAKE_DP_SESSION_ON_PROMPT=1       — real 1.18.11 behaviour: the session row and
+//     the "message=created id=ses_..." stderr line are written only when the first
+//     prompt arrives (docs/BINDING-PROTOCOL.md), never at launch
 //
 // Script format ($FAKE_DP_SCRIPT):
 //
@@ -131,7 +134,8 @@ func run(args []string) error {
 	// session). Fall back to creating a new session only when the DB is empty.
 	// FAKE_DP_FORCE_NEW_SESSION=1 skips the auto-resume and always creates a new session.
 	activeSessionID := sessionID
-	if activeSessionID == "" {
+	sessionOnPrompt := os.Getenv("FAKE_DP_SESSION_ON_PROMPT") == "1" && sessionID == ""
+	if activeSessionID == "" && !sessionOnPrompt {
 		if autoFlag && os.Getenv("FAKE_DP_FORCE_NEW_SESSION") != "1" {
 			var existing string
 			row := db.QueryRow(`SELECT id FROM session ORDER BY time_created DESC LIMIT 1`)
@@ -141,16 +145,8 @@ func run(args []string) error {
 		}
 		if activeSessionID == "" {
 			activeSessionID = generateID("ses")
-			if err := insertSession(db, activeSessionID); err != nil {
-				return fmt.Errorf("fake-devpass-code: insert session: %w", err)
-			}
-			// Reproduce the phase-16-verified real devpass-code protocol: log the
-			// newly created session id to stderr in the exact format the real CLI
-			// emits (see docs/BINDING-PROTOCOL.md). Only actual row-creation events
-			// are logged; resuming an existing session never logs this line.
-			if printLogs {
-				fmt.Fprintf(os.Stderr, "time=%s level=INFO service=session message=created id=%s\n",
-					time.Now().UTC().Format(time.RFC3339Nano), activeSessionID)
+			if err := createSession(db, activeSessionID, printLogs); err != nil {
+				return err
 			}
 		}
 	}
@@ -237,6 +233,15 @@ func run(args []string) error {
 			continue
 		}
 
+		// FAKE_DP_SESSION_ON_PROMPT: the real CLI creates its session (row +
+		// "message=created" log line) only when the first prompt arrives.
+		if activeSessionID == "" {
+			activeSessionID = generateID("ses")
+			if err := createSession(db, activeSessionID, printLogs); err != nil {
+				return err
+			}
+		}
+
 		var reply string
 		if turnIdx < len(script) {
 			reply = script[turnIdx].Reply
@@ -288,6 +293,21 @@ func run(args []string) error {
 		fmt.Println("> ")
 	}
 
+	return nil
+}
+
+// createSession inserts the session row and reproduces the phase-16-verified
+// real devpass-code protocol: the newly created session id is logged to stderr
+// in the exact format the real CLI emits (see docs/BINDING-PROTOCOL.md). Only
+// actual row-creation events are logged; resuming never logs this line.
+func createSession(db *sql.DB, id string, printLogs bool) error {
+	if err := insertSession(db, id); err != nil {
+		return fmt.Errorf("fake-devpass-code: insert session: %w", err)
+	}
+	if printLogs {
+		fmt.Fprintf(os.Stderr, "time=%s level=INFO service=session message=created id=%s\n",
+			time.Now().UTC().Format(time.RFC3339Nano), id)
+	}
 	return nil
 }
 

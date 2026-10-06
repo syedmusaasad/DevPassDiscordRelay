@@ -2,8 +2,10 @@
 //
 // Flow:
 //  1. Only messages from DISCORD_USER_ID are honoured; bots and other authors are dropped.
-//  2. Readiness probe: capture-pane polls for "Ask anything..." up to 30 s;
-//     falls back to a fixed 2 s sleep if the pane never becomes ready.
+//  2. Readiness probe: capture-pane polls for the TUI ready signature up to
+//     30 s (see PaneReady: the first-screen "Ask anything..." placeholder OR the
+//     persistent input row); falls back to a fixed 2 s sleep if the pane never
+//     becomes ready.
 //  3. Image attachments are downloaded to <stateDir>/staging/<sessionID>/ with
 //     filenames sanitised of exotic whitespace.  Their local path is appended to the
 //     injected text.
@@ -19,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -32,6 +35,28 @@ const (
 	readinessFallback     = 2 * time.Second
 	readinessSignature    = "Ask anything..."
 )
+
+// inputRowRe matches the persistent input-row marker of the 1.18.11 TUI: the
+// "Pl-Interactive" agent line drawn inside the input bar (┃ prefix). Unlike the
+// "Ask anything..." placeholder it is still on screen after the first turn.
+var inputRowRe = regexp.MustCompile(`(?m)^\s*┃\s+Pl-Interactive\b`)
+
+// inputBarRe matches the bottom border of the input bar (╹▀▀▀…).
+var inputBarRe = regexp.MustCompile(`(?m)^\s*╹▀{3,}`)
+
+// PaneReady reports whether captured pane text shows a TUI that accepts input.
+// Pinned to devpass-code 1.18.11:
+//   - fresh pane: the "Ask anything..." placeholder;
+//   - post-turn pane (placeholder gone): the "┃  Pl-Interactive …" input row
+//     directly above the "╹▀▀▀" input-bar border.
+//
+// Observed signatures are recorded in docs/REMEDIATION-24.md.
+func PaneReady(text string) bool {
+	if strings.Contains(text, readinessSignature) {
+		return true
+	}
+	return inputRowRe.MatchString(text) && inputBarRe.MatchString(text)
+}
 
 // ThreadRenamer is an optional interface a Discord client may implement to
 // rename a thread.
@@ -82,7 +107,27 @@ func (inj *Injector) Inject(target, sessionID, content string, attachments []Att
 		log.Printf("inject: attachment download partial error: %v", err)
 	}
 
-	// Build the final text
+	text := joinText(content, extraPaths)
+
+	// Readiness probe
+	waitForReady(target)
+
+	// Send to pane
+	return sendKeysLiteral(target, text)
+}
+
+// SendPrompt downloads attachments and sends the text WITHOUT running the
+// readiness probe. The caller must already have established readiness with
+// WaitReady (the spawn path does, so it can tear down on probe failure).
+func (inj *Injector) SendPrompt(target, sessionID, content string, attachments []Attachment) error {
+	extraPaths, err := inj.downloadAttachments(sessionID, attachments)
+	if err != nil {
+		log.Printf("inject: attachment download partial error: %v", err)
+	}
+	return sendKeysLiteral(target, joinText(content, extraPaths))
+}
+
+func joinText(content string, extraPaths []string) string {
 	text := content
 	if len(extraPaths) > 0 {
 		if text != "" {
@@ -90,12 +135,7 @@ func (inj *Injector) Inject(target, sessionID, content string, attachments []Att
 		}
 		text += strings.Join(extraPaths, "\n")
 	}
-
-	// Readiness probe
-	waitForReady(target)
-
-	// Send to pane
-	return sendKeysLiteral(target, text)
+	return text
 }
 
 // Attachment is a named URL for a file attachment.
@@ -184,16 +224,31 @@ func sanitiseFilename(name string) string {
 // waitForReady probes the tmux pane for the readiness signature up to 30 s;
 // falls back to a fixed 2 s sleep.
 func waitForReady(target string) {
-	deadline := time.Now().Add(readinessProbeTimeout)
-	for time.Now().Before(deadline) {
-		text, err := capturePaneText(target)
-		if err == nil && strings.Contains(text, readinessSignature) {
-			return
-		}
-		time.Sleep(readinessProbePoll)
+	if WaitReady(target) {
+		return
 	}
 	// Fallback
 	time.Sleep(readinessFallback)
+}
+
+// WaitReady polls the pane until PaneReady, for at most 30 s. It returns false
+// on timeout, or early if the pane cannot be captured for ~1 s (pane gone).
+func WaitReady(target string) bool {
+	deadline := time.Now().Add(readinessProbeTimeout)
+	captureErrs := 0
+	for time.Now().Before(deadline) {
+		text, err := capturePaneText(target)
+		if err == nil {
+			captureErrs = 0
+			if PaneReady(text) {
+				return true
+			}
+		} else if captureErrs++; captureErrs >= 5 {
+			return false
+		}
+		time.Sleep(readinessProbePoll)
+	}
+	return false
 }
 
 // capturePaneText captures the visible text of a tmux pane.

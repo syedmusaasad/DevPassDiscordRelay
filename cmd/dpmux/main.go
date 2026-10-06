@@ -525,6 +525,7 @@ func buildDevpassCmd(devpassBin string, args []string, nonce string, stderrLog s
 		"FAKE_DP_SWALLOW_UNTIL_READY",
 		"FAKE_DP_REFUSE_FIRST_RESUME",
 		"FAKE_DP_SCRIPT",
+		"FAKE_DP_SESSION_ON_PROMPT",
 	} {
 		if v := os.Getenv(key); v != "" {
 			envPairs = append(envPairs, key+"="+shellQuote(v))

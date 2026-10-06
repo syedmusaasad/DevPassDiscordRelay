@@ -1,0 +1,94 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-10-06T04:08:51Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.63MB 0.3s done
+#5 DONE 0.3s
+
+#6 [test  3/11] RUN mkdir -p /run/systemd/system
+#6 CACHED
+
+#7 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#7 CACHED
+
+#8 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#8 CACHED
+
+#9 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#9 CACHED
+
+#10 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#10 CACHED
+
+#11 [test  6/11] WORKDIR /workspace
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.3s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.2s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 52.8s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 6.5s done
+#16 exporting manifest sha256:7785f46cd0773c5b2f3363653b7ea1c0b6aff82cca7cda5e1a5ccb0264c5e678
+#16 exporting manifest sha256:7785f46cd0773c5b2f3363653b7ea1c0b6aff82cca7cda5e1a5ccb0264c5e678 done
+#16 exporting config sha256:e471e9982ee23987688d1c067bdffd09cc2fab1fdb2c1300f0a347b1c51b5f28 done
+#16 exporting attestation manifest sha256:9d35e2993e15d0d2dff32bec90b73edf7647cf76d5b75f4cf50f34fb57919e86 done
+#16 exporting manifest list sha256:f086dd9d844d83084a343255f8e1f51596708e0c9eb5f1fc0597623956ceb9f7 done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 1.7s done
+#16 DONE 8.3s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestSpawn_PromptBeforeBind
+2026/10/06 04:10:09 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:10:09 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:10:09 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:10:09 main.go:157: relay: starting watcher
+2026/10/06 04:10:09 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:10:09 watcher.go:2059: mirror: spawning dpmux (spawnStart=1791259809508)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791259809511-1246" started, target=dp-1791259809511-1246:0.0
+2026/10/06 04:10:09 watcher.go:2069: mirror: dpmux spawned session "dp-1791259809511-1246"
+2026/10/06 04:10:24 watcher.go:1279: mirror: spawn from Discord: timed out or failed to verify session identity for dpmux session "dp-1791259809511-1246" (spawnStart=1791259809508, stderrLog=/tmp/TestSpawn_PromptBeforeBind4127247517/002/stderr-dp-1791259809511-1246.log)
+    spawn_test.go:779: first prompt never appeared in a spawned pane (deadlock: prompt withheld until identity)
+--- FAIL: TestSpawn_PromptBeforeBind (40.28s)
+FAIL
+FAIL	github.com/devpass/devpass-discord-relay/test/integration	40.288s
+FAIL
+
+make: *** [Makefile:38: integration] Error 1

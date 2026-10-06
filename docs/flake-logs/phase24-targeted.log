@@ -1,0 +1,109 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/relay ./cmd/relay
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/dpmux ./cmd/dpmux
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/fake-devpass-code ./cmd/fake-devpass-code
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/mock-discord ./cmd/mock-discord
+time="2026-10-06T04:13:53Z" level=warning msg="Docker Compose is configured to build using Bake, but buildx isn't installed"
+#0 building with "default" instance using docker driver
+
+#1 [test internal] load build definition from Dockerfile.test
+#1 transferring dockerfile: 1.95kB done
+#1 DONE 0.0s
+
+#2 [test internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [test internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [test  1/11] FROM docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517
+#4 resolve docker.io/library/ubuntu:24.04@sha256:33ceb71981b602c1a7443a53469e4dba065f7503eab3078a2d7a57a2ab987517 0.0s done
+#4 DONE 0.0s
+
+#5 [test internal] load build context
+#5 transferring context: 29.32MB 0.2s done
+#5 DONE 0.2s
+
+#6 [test  6/11] WORKDIR /workspace
+#6 CACHED
+
+#7 [test  2/11] RUN apt-get update && apt-get install -y --no-install-recommends     tmux     systemd     dbus     ca-certificates     curl     && rm -rf /var/lib/apt/lists/*
+#7 CACHED
+
+#8 [test  4/11] RUN curl -sL https://dl.google.com/go/go1.27.1.linux-amd64.tar.gz | tar -C /usr/local -xz
+#8 CACHED
+
+#9 [test  5/11] RUN useradd -m -s /bin/bash testuser &&     mkdir -p /home/testuser/go/pkg/mod &&     chown -R testuser:testuser /home/testuser/go
+#9 CACHED
+
+#10 [test  7/11] COPY --chown=testuser:testuser go.mod go.sum ./
+#10 CACHED
+
+#11 [test  3/11] RUN mkdir -p /run/systemd/system
+#11 CACHED
+
+#12 [test  8/11] RUN go mod download
+#12 CACHED
+
+#13 [test  9/11] COPY --chown=testuser:testuser . .
+#13 DONE 0.3s
+
+#14 [test 10/11] RUN chmod 0755 test/integration/with-user-manager.sh
+#14 DONE 0.2s
+
+#15 [test 11/11] RUN mkdir -p /home/testuser/bin &&     CGO_ENABLED=0 go build -o /home/testuser/bin/fake-devpass-code ./cmd/fake-devpass-code &&     CGO_ENABLED=0 go build -o /home/testuser/bin/mock-discord ./cmd/mock-discord &&     CGO_ENABLED=0 go build -o /home/testuser/bin/relay ./cmd/relay &&     CGO_ENABLED=0 go build -o /home/testuser/bin/dpmux ./cmd/dpmux
+#15 DONE 51.4s
+
+#16 [test] exporting to image
+#16 exporting layers
+#16 exporting layers 6.8s done
+#16 exporting manifest sha256:0a583b6730d1f0e115bc4ba19c740dad4c459aba8fd4ceb0f601f9f404cb2ff4 done
+#16 exporting config sha256:68db3f79acb9b4bbb98e6db6a386bf312850051f1bb3d9a444cfd5dfbbcd7b83 done
+#16 exporting attestation manifest sha256:5ed9b4724a2710ede41eab107f05218d7fd8a9cc22e742942e79fa7ee8bae2f7 done
+#16 exporting manifest list sha256:3b43de13311fec8bccc21dff98668c1f2abe30aeaf2199dc1e7ee00f4ea10ba3 done
+#16 naming to docker.io/library/devpass-discord-relay-test:latest done
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest
+#16 unpacking to docker.io/library/devpass-discord-relay-test:latest 1.7s done
+#16 DONE 8.6s
+
+#17 [test] resolving provenance for metadata file
+#17 DONE 0.0s
+ test  Built
+=== RUN   TestSpawn_PromptBeforeBind
+2026/10/06 04:15:10 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:15:10 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:15:10 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:15:10 main.go:157: relay: starting watcher
+2026/10/06 04:15:10 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:15:10 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260110326)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260110334-1228" started, target=dp-1791260110334-1228:0.0
+2026/10/06 04:15:10 watcher.go:2090: mirror: dpmux spawned session "dp-1791260110334-1228"
+2026/10/06 04:15:10 watcher.go:2172: mirror: bound new session ses_1791260110416284_1 to dpmux dp-1791260110334-1228 (target=dp-1791260110334-1228:0.0)
+2026/10/06 04:15:10 watcher.go:513: mirror: attaching session ses_1791260110416284_1 target=dp-1791260110334-1228:0.0
+    spawn_test.go:783: ✓ prompt visible in pane dp-1791260110334-1228:0.0
+    spawn_test.go:790: ✓ thread created: id=2
+    spawn_test.go:816: ✓ prompt in DB under ses_1791260110416284_1, matching the created line
+    spawn_test.go:828: ✓ reply mirrored; session bound from the created line
+--- PASS: TestSpawn_PromptBeforeBind (0.75s)
+=== RUN   TestSpawn_FailureTeardownSparesLiveSession
+2026/10/06 04:15:11 main.go:55: relay: .env load: no .env found in [/home/testuser/.config/devpass-discord-relay/.env .env] (continuing with environment)
+2026/10/06 04:15:11 main.go:137: relay: gateway ready (READY)
+2026/10/06 04:15:11 main.go:156: relay: tmux isolation mode: systemd-user-scope
+2026/10/06 04:15:11 main.go:157: relay: starting watcher
+2026/10/06 04:15:11 watcher.go:1275: mirror: channel message received – spawning new dpmux session
+2026/10/06 04:15:11 watcher.go:2080: mirror: spawning dpmux (spawnStart=1791260111507)
+[dpmux] tmux isolation mode: systemd-user-scope
+[dpmux] session "dp-1791260111509-1294" started, target=dp-1791260111509-1294:0.0
+2026/10/06 04:15:11 watcher.go:2090: mirror: dpmux spawned session "dp-1791260111509-1294"
+    spawn_test.go:923: failed spawn session: dp-1791260111509-1294
+2026/10/06 04:15:14 watcher.go:1420: mirror: teardown failed spawn session dp-1791260111509-1294
+2026/10/06 04:15:14 watcher.go:1279: mirror: spawn from Discord: timed out or failed to verify session identity for dpmux session "dp-1791260111509-1294" (spawnStart=1791260111507, stderrLog=/tmp/TestSpawn_FailureTeardownSparesLiveSession1981475740/002/stderr-dp-1791260111509-1294.log)
+    spawn_test.go:961: ✓ live pane + record survive; failed spawn pane gone; one notice
+--- PASS: TestSpawn_FailureTeardownSparesLiveSession (5.40s)
+PASS
+ok  	github.com/devpass/devpass-discord-relay/test/integration	6.159s

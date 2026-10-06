@@ -82,6 +82,7 @@ func TestInvariant1_OwnTranscriptBinding(t *testing.T) {
 		"DISCORD_USER_ID=user-inv1-001",
 		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", fakeDP),
 		"FAKE_DP_FORCE_NEW_SESSION=1",
+		"FAKE_DP_SESSION_ON_PROMPT=1", // real 1.18.11: session exists only after the first prompt
 	)
 	relayCmd.Stdout = io.Discard
 	relayCmd.Stderr = os.Stderr
@@ -257,6 +258,7 @@ func TestSpawn_ChannelMessageTriggersDpmux(t *testing.T) {
 		"DISCORD_USER_ID=user-spawn-002",
 		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", fakeDP),
 		"FAKE_DP_FORCE_NEW_SESSION=1",
+		"FAKE_DP_SESSION_ON_PROMPT=1", // real 1.18.11: session exists only after the first prompt
 	)
 	relayCmd.Stdout = io.Discard
 	relayCmd.Stderr = os.Stderr
@@ -676,4 +678,285 @@ func TestInvariant1_MissingIdentityFailsClosed(t *testing.T) {
 			}
 		}
 	})
+}
+
+// ── helpers for the phase-2 live-CLI fixes ───────────────────────────────────
+
+// listDpSessions returns the names of all tmux sessions starting with "dp-".
+func listDpSessions() []string {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, s := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(s, "dp-") {
+			names = append(names, s)
+		}
+	}
+	return names
+}
+
+func killDpSessionsCleanup(t *testing.T) {
+	t.Cleanup(func() {
+		for _, s := range listDpSessions() {
+			exec.Command("tmux", "kill-session", "-t", s).Run()
+		}
+	})
+}
+
+// ── TestSpawn_PromptBeforeBind ───────────────────────────────────────────────
+//
+// Real devpass-code 1.18.11 creates its session (DB row + "message=created"
+// stderr line) only AFTER the first prompt arrives (docs/BINDING-PROTOCOL.md).
+// FAKE_DP_SESSION_ON_PROMPT=1 reproduces that. The relay must therefore deliver
+// the prompt first and bind from the created line afterwards. Against the old
+// bind-then-inject order this deadlocks until the bind timeout and never
+// creates a thread.
+func TestSpawn_PromptBeforeBind(t *testing.T) {
+	mustBin(t, "tmux")
+	mustBin(t, "dpmux")
+	fakeDP := mustBin(t, "fake-devpass-code")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+	killDpSessionsCleanup(t)
+
+	xdgHome := t.TempDir()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+
+	const prompt = "prompt-before-bind: hello from discord"
+	const reply = "PBB-REPLY-MIRRORED"
+	script := filepath.Join(t.TempDir(), "script.json")
+	if err := os.WriteFile(script, []byte(fmt.Sprintf(`[{"prompt":%q,"reply":%q}]`, prompt, reply)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mockPort, mockGWPort := "19940", "19941"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+
+	relayCmd := exec.Command(relayBin)
+	relayCmd.Env = append(os.Environ(),
+		"DISCORD_TOKEN=test-token",
+		"DISCORD_CHANNEL_ID=test-spawn-pbb",
+		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
+		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
+		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
+		"DISCORD_USER_ID=user-pbb-001",
+		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", fakeDP),
+		"FAKE_DP_SESSION_ON_PROMPT=1",
+		"FAKE_DP_FORCE_NEW_SESSION=1",
+		"FAKE_DP_SCRIPT="+script,
+		"RELAY_SPAWN_BIND_TIMEOUT_MS=15000",
+	)
+	relayCmd.Stdout = io.Discard
+	relayCmd.Stderr = os.Stderr
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill() })
+
+	waitForRelayReady(t, stateDir)
+	if err := dispatchEvent(mockPort, buildMessageEvent("msg-pbb-1", "test-spawn-pbb", "user-pbb-001", false, prompt, nil)); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	// Prompt delivered: visible in the pane. The pane must show it even though
+	// no identity exists yet (the knob creates the row only on the prompt).
+	var paneTarget string
+	deadline := time.Now().Add(40 * time.Second)
+	for time.Now().Before(deadline) && paneTarget == "" {
+		for _, s := range listDpSessions() {
+			out, err := exec.Command("tmux", "capture-pane", "-t", s+":0.0", "-p").Output()
+			if err == nil && strings.Contains(string(out), prompt) {
+				paneTarget = s + ":0.0"
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if paneTarget == "" {
+		t.Fatalf("first prompt never appeared in a spawned pane (deadlock: prompt withheld until identity)")
+	}
+	t.Logf("✓ prompt visible in pane %s", paneTarget)
+
+	// Bound from the created line: a thread must appear and name the session.
+	var threadID string
+	if err := waitForThreadCreation(t, mockPort, &threadID, 40*time.Second); err != nil {
+		t.Fatalf("thread not created after prompt-first delivery: %v", err)
+	}
+	t.Logf("✓ thread created: id=%s", threadID)
+
+	// Prompt delivered: present in the DB, under exactly the session named in
+	// the spawn's own stderr "created" line.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var sessionID string
+	deadline = time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) && sessionID == "" {
+		db.QueryRow(`SELECT session_id FROM part WHERE data LIKE ? LIMIT 1`, "%"+prompt+"%").Scan(&sessionID)
+		time.Sleep(200 * time.Millisecond)
+	}
+	if sessionID == "" {
+		t.Fatal("prompt never landed in the DB")
+	}
+	logs, _ := filepath.Glob(filepath.Join(stateDir, "stderr-dp-*.log"))
+	if len(logs) != 1 {
+		t.Fatalf("expected one spawn stderr log, got %v", logs)
+	}
+	logData, _ := os.ReadFile(logs[0])
+	if !strings.Contains(string(logData), "message=created id="+sessionID) {
+		t.Fatalf("stderr log lacks created line for %s:\n%s", sessionID, logData)
+	}
+	t.Logf("✓ prompt in DB under %s, matching the created line", sessionID)
+
+	// Reply mirrored into Discord, and the thread/root names the bound session.
+	if err := waitForMessageContent(t, mockPort, reply, 30*time.Second); err != nil {
+		t.Fatalf("reply not mirrored: %v", err)
+	}
+	if err := waitForMessageContent(t, mockPort, sessionID, 5*time.Second); err != nil {
+		t.Fatalf("root message does not name the bound session: %v", err)
+	}
+	if err := waitForSessionRecord(stateDir, sessionID, 10*time.Second); err != nil {
+		t.Fatalf("session not recorded: %v", err)
+	}
+	t.Log("✓ reply mirrored; session bound from the created line")
+}
+
+// ── TestSpawn_FailureTeardownSparesLiveSession ───────────────────────────────
+//
+// A spawn that fails identity must tear down only its own tmux session. A live,
+// bound session (its pane and its sessions.json record) must survive, and the
+// failure is announced exactly once.
+func TestSpawn_FailureTeardownSparesLiveSession(t *testing.T) {
+	mustBin(t, "tmux")
+	mustBin(t, "dpmux")
+	fakeDP := mustBin(t, "fake-devpass-code")
+	relayBin := mustBin(t, "relay")
+	mockDS := mustBin(t, "mock-discord")
+	killDpSessionsCleanup(t)
+
+	xdgHome := t.TempDir()
+	stateDir := t.TempDir()
+	dbPath := filepath.Join(xdgHome, "devpass-code", "opencode.db")
+
+	mockPort, mockGWPort := "19942", "19943"
+	startMockDiscord(t, mockDS, mockPort, mockGWPort)
+	if err := waitForHTTP(fmt.Sprintf("http://127.0.0.1:%s/api/v10/gateway", mockPort), 5*time.Second); err != nil {
+		t.Fatalf("mock-discord not ready: %v", err)
+	}
+
+	// Live, bound session: a running fake CLI whose row exists and whose record
+	// is in sessions.json with a thread.
+	const liveName = "dp-live-spare-001"
+	if out, err := exec.Command("tmux", "new-session", "-d", "-s", liveName, "-x", "200", "-y", "50",
+		"env", "XDG_DATA_HOME="+xdgHome, fakeDP, "--auto").CombinedOutput(); err != nil {
+		t.Fatalf("start live session: %v\n%s", err, out)
+	}
+	livePane := liveName + ":0.0"
+	if err := waitForPaneText(t, livePane, "Ask anything", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var liveID string
+	if err := waitForSessionRow(t, db, &liveID, 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	sessionsJSON := fmt.Sprintf(`[{"session_id":%q,"tmux_target":%q,"thread_id":"thread-live-001","thread_root_id":"root-live-001","channel_id":"test-spawn-tdown","status":"active"}]`, liveID, livePane)
+	if err := os.WriteFile(filepath.Join(stateDir, "sessions.json"), []byte(sessionsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The spawned CLI is ready and accepts input but never logs a created id.
+	stub := filepath.Join(t.TempDir(), "stub-never-creates")
+	stubBody := "#!/bin/sh\necho 'Ask anything...'\ncat >/dev/null\n"
+	if err := os.WriteFile(stub, []byte(stubBody), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	relayCmd := exec.Command(relayBin)
+	relayCmd.Env = append(os.Environ(),
+		"DISCORD_TOKEN=test-token",
+		"DISCORD_CHANNEL_ID=test-spawn-tdown",
+		fmt.Sprintf("DISCORD_API_URL=http://127.0.0.1:%s", mockPort),
+		fmt.Sprintf("RELAY_DEVPASS_DB=%s", dbPath),
+		fmt.Sprintf("RELAY_STATE_DIR=%s", stateDir),
+		"DISCORD_USER_ID=user-tdown-001",
+		fmt.Sprintf("RELAY_DEVPASS_BIN=%s", stub),
+		"RELAY_SPAWN_BIND_TIMEOUT_MS=3000",
+	)
+	relayCmd.Stdout = io.Discard
+	relayCmd.Stderr = os.Stderr
+	if err := relayCmd.Start(); err != nil {
+		t.Fatalf("start relay: %v", err)
+	}
+	t.Cleanup(func() { relayCmd.Process.Kill() })
+
+	waitForRelayReady(t, stateDir)
+	if err := dispatchEvent(mockPort, buildMessageEvent("msg-tdown-1", "test-spawn-tdown", "user-tdown-001", false, "teardown: this spawn fails identity", nil)); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	// The failed spawn appears, then is torn down.
+	var spawnName string
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) && spawnName == "" {
+		for _, s := range listDpSessions() {
+			if s != liveName {
+				spawnName = s
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if spawnName == "" {
+		t.Fatal("no spawned dp- session ever appeared")
+	}
+	t.Logf("failed spawn session: %s", spawnName)
+
+	// Exactly one failure notice (wait for it, then let any duplicate settle).
+	const notice = "Could not start a new devpass-code session"
+	if err := waitForMessageContent(t, mockPort, notice, 40*time.Second); err != nil {
+		t.Fatalf("no failure notice posted: %v", err)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	msgs, err := getSentMessages(mockPort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notices := 0
+	for _, m := range msgs {
+		if strings.Contains(contentOf(m), notice) {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("expected exactly one failure notice, got %d", notices)
+	}
+
+	// The failed spawn's pane is gone.
+	if err := exec.Command("tmux", "has-session", "-t", "="+spawnName).Run(); err == nil {
+		t.Fatalf("failed spawn session %s still running after teardown", spawnName)
+	}
+
+	// The live session's pane and record survive.
+	if err := exec.Command("tmux", "has-session", "-t", "="+liveName).Run(); err != nil {
+		t.Fatalf("live session %s was killed by the failed spawn's teardown", liveName)
+	}
+	out, err := exec.Command("tmux", "capture-pane", "-t", livePane, "-p").Output()
+	if err != nil || !strings.Contains(string(out), "Ask anything") {
+		t.Fatalf("live pane damaged: err=%v capture=%q", err, out)
+	}
+	if err := waitForSessionRecord(stateDir, liveID, 2*time.Second); err != nil {
+		t.Fatalf("live session record removed from sessions.json: %v", err)
+	}
+	t.Log("✓ live pane + record survive; failed spawn pane gone; one notice")
 }
